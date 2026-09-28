@@ -216,7 +216,21 @@
   <button id="forget-all" type="button">Forget everything</button>
   <p id="memory-note" class="state"></p>
 
-  <p>This page is served over plain HTTP on your network. Anyone who can reach it can set these (values are never shown back). Set <code>WEB_CHAT_TOKEN</code> to require a token.</p>
+  <h2>Who can open this page</h2>
+  <p id="lock-state" class="hint"></p>
+  <form id="lock-form">
+    <div class="field">
+      <label for="lock-token">Password</label>
+      <span class="hint">At least 8 characters. A browser that has it stays signed in; the dashboard's open button keeps working. It is <code>WEB_CHAT_TOKEN</code> in the app's <code>.env</code>, and the page is still plain HTTP, so this is a lock for your own network, not the internet.</span>
+      <input type="password" id="lock-token" autocomplete="new-password" spellcheck="false" />
+    </div>
+    <div class="field">
+      <span class="state" id="lock-note"></span>
+    </div>
+    <button id="lock-set" type="submit">Set password</button>
+    <button id="lock-remove" type="button" hidden>Remove password</button>
+    <button id="lock-signout" type="button" hidden>Sign out on this browser</button>
+  </form>
   <p><a id="chat-link" href="#">← back to the chat</a></p>
 </main>
 
@@ -225,8 +239,10 @@
   "use strict";
 
   var NAMES = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
+  // A token in the URL (the link the CLI logs) rides along on every call. Without
+  // one the browser is signed in by cookie, and the URLs stay clean.
   var token = new URLSearchParams(location.search).get("token") || "";
-  var q = "?token=" + encodeURIComponent(token);
+  var q = token ? "?token=" + encodeURIComponent(token) : "";
   var banner = document.getElementById("banner");
   var save = document.getElementById("save");
   var SELECTS = {
@@ -298,7 +314,17 @@
     setState(id, "selected: " + (f.current || fallback));
   }
 
+  function renderLock(locked) {
+    lockState.textContent = locked
+      ? "Locked. Anyone opening this page is asked for the password once."
+      : "Open to anyone on your network. Set a password to change that.";
+    lockSet.textContent = locked ? "Change password" : "Set password";
+    lockRemove.hidden = !locked;
+    lockSignout.hidden = !locked;
+  }
+
   function render(data) {
+    renderLock(!!data.locked);
     renderPersonality(data.personality);
     renderVoice(data.voice);
     renderToggle("FACE_TRACKING", data.face_tracking, "off");
@@ -638,6 +664,44 @@
       args: f.args.value.trim(),
     }).then(function (data) { clearForm(); return data; }))
       .finally(function () { mcpSave.disabled = false; });
+  });
+
+  // ── the lock ──────────────────────────────────────────────────────────
+  var lockState = document.getElementById("lock-state");
+  var lockToken = document.getElementById("lock-token");
+  var lockNote = document.getElementById("lock-note");
+  var lockSet = document.getElementById("lock-set");
+  var lockRemove = document.getElementById("lock-remove");
+  var lockSignout = document.getElementById("lock-signout");
+
+  function lockAction(body, done) {
+    lockNote.textContent = "";
+    lockSet.disabled = lockRemove.disabled = lockSignout.disabled = true;
+    postJson("/lock", body)
+      .then(function (data) {
+        lockToken.value = "";
+        renderLock(!!data.locked);
+        lockNote.textContent = done;
+      })
+      .catch(function (e) { lockNote.textContent = e.message; })
+      .finally(function () { lockSet.disabled = lockRemove.disabled = lockSignout.disabled = false; });
+  }
+
+  document.getElementById("lock-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var value = lockToken.value.trim();
+    if (!value) { lockNote.textContent = "Type a password first."; return; }
+    lockAction({ token: value }, "Password set. This browser is signed in; others will be asked.");
+  });
+
+  lockRemove.addEventListener("click", function () {
+    lockAction({ remove: true }, "Password removed. The page is open to your network again.");
+  });
+
+  lockSignout.addEventListener("click", function () {
+    postJson("/logout", {})
+      .then(function () { location.href = "/settings"; })
+      .catch(function (e) { lockNote.textContent = e.message; });
   });
 
   // ── saved conversations ───────────────────────────────────────────────

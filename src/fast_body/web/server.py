@@ -6,18 +6,24 @@ We run our own uvicorn rather than the one `ReachyMiniApp` starts for
 port.
 
 Access control and the reasoning behind it are in the README's Companion page
-section. There is no TLS.
+section: an optional password, asked for once per browser and then kept in a
+cookie, so the dashboard's open button (a plain URL) keeps working. There is no
+TLS.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import os
+import secrets
 import threading
 from typing import Any
+from urllib.parse import parse_qs
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route, WebSocketRoute
 
 from fast_body import memory
@@ -27,11 +33,22 @@ from fast_body.config import (
     PACKAGE_DIR,
     Config,
     env_status,
+    forget_env,
     persist_env,
 )
 from fast_body.personality import list_personalities
 from fast_body.web import app_routes, settings_routes
-from fast_body.web.access import MAX_MESSAGE_CHARS, not_found, origin_ok, token_ok
+from fast_body.web.access import (
+    MAX_MESSAGE_CHARS,
+    MIN_TOKEN_CHARS,
+    end_session,
+    local_path,
+    not_found,
+    origin_ok,
+    query_token_ok,
+    start_session,
+    token_ok,
+)
 from fast_body.web.hub import WebChatHub
 
 __all__ = ["MAX_MESSAGE_CHARS", "WebChatServer"]
@@ -41,6 +58,7 @@ logger = logging.getLogger(__name__)
 _STATIC = PACKAGE_DIR / "static"
 _PAGE = _STATIC / "index.html"
 _SETTINGS_PAGE = _STATIC / "settings.html"
+_LOGIN_PAGE = _STATIC / "login.html"
 
 # Starlette's code for "policy violation".
 _WS_POLICY_VIOLATION = 1008
@@ -71,8 +89,12 @@ class WebChatServer:
         self.hub = hub
         self.host = host
         self.port = port
-        # None means open — see the README for why that's the default.
+        # None means open — see the README for why that's the default. Set, the
+        # pages ask for it once and keep the browser signed in with a cookie.
         self.token = (token or "").strip() or None
+        # Pause after a wrong password, so guessing over the LAN is slow. Tests
+        # set it to zero.
+        self.login_delay = 1.0
         # False until the conversation loop is actually running. The pages use it
         # to tell "still being configured" apart from "broken".
         self.ready = False
@@ -135,15 +157,86 @@ class WebChatServer:
             logger.error("page missing at %s: %s", path, e)
             return PlainTextResponse("Page unavailable", status_code=500)
 
-    async def _page(self, request: Any) -> Any:
+    def _login_form(self, target: str, *, error: str = "") -> Any:
+        """The sign-in page, which returns to `target` once the password is right."""
+        try:
+            page = _LOGIN_PAGE.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.error("page missing at %s: %s", _LOGIN_PAGE, e)
+            return PlainTextResponse("Page unavailable", status_code=500)
+        page = page.replace("{{next}}", html.escape(local_path(target))).replace("{{error}}", html.escape(error))
+        return HTMLResponse(page, status_code=401)
+
+    async def _html_page(self, request: Any, path: Any) -> Any:
+        """A page behind the lock: the sign-in form without a session, else the page.
+
+        A token in the URL (the link the CLI logs) also signs the browser in, so
+        the next plain visit, from the dashboard's button say, needs nothing.
+        """
         if not token_ok(request, self.token):
-            return not_found()
-        return self._serve(_PAGE)
+            return self._login_form(request.url.path)
+        response = self._serve(path)
+        if self.token is not None and query_token_ok(request, self.token):
+            start_session(response, self.token)
+        return response
+
+    async def _page(self, request: Any) -> Any:
+        return await self._html_page(request, _PAGE)
 
     async def _settings_page(self, request: Any) -> Any:
-        if not token_ok(request, self.token):
-            return not_found()
-        return self._serve(_SETTINGS_PAGE)
+        return await self._html_page(request, _SETTINGS_PAGE)
+
+    async def _login(self, request: Any) -> Any:
+        """A plain form POST from the sign-in page: `token` and `next`."""
+        if not origin_ok(request.headers):
+            return JSONResponse({"error": "bad origin"}, status_code=403)
+        if not request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+            return JSONResponse({"error": "expected a form"}, status_code=415)
+        raw = (await request.body())[:4096].decode("utf-8", "replace")
+        fields = parse_qs(raw, keep_blank_values=True)
+        submitted = (fields.get("token") or [""])[0]
+        target = local_path((fields.get("next") or ["/"])[0])
+        if self.token is None:
+            return RedirectResponse(target, status_code=303)
+        if not secrets.compare_digest(submitted, self.token):
+            await asyncio.sleep(self.login_delay)
+            return self._login_form(target, error="That password is not right.")
+        response = RedirectResponse(target, status_code=303)
+        start_session(response, self.token)
+        return response
+
+    async def _logout(self, request: Any) -> Any:
+        """Forget this browser. Other browsers stay signed in."""
+        body, error = await self._json_body(request)
+        if body is None:
+            return error
+        response = JSONResponse({"signed_out": True})
+        end_session(response)
+        return response
+
+    async def _lock(self, request: Any) -> Any:
+        """Set, change or remove the password. Setting it signs this browser in."""
+        body, error = await self._json_body(request)
+        if body is None:
+            return error
+        if body.get("remove") is True:
+            forget_env("WEB_CHAT_TOKEN")
+            self.token = None
+            response = JSONResponse({"locked": False})
+            end_session(response)
+            return response
+        token = str(body.get("token", "")).strip()
+        if len(token) < MIN_TOKEN_CHARS:
+            return JSONResponse({"error": f"use at least {MIN_TOKEN_CHARS} characters"}, status_code=400)
+        # dotenv reads the .env back at the next start: `#` begins a comment and
+        # a quoted value is unquoted, so either would change the password then.
+        if "#" in token or token[0] in "\"'":
+            return JSONResponse({"error": "no # and no quotes at the start"}, status_code=400)
+        persist_env({"WEB_CHAT_TOKEN": token})
+        self.token = os.environ.get("WEB_CHAT_TOKEN") or token
+        response = JSONResponse({"locked": True})
+        start_session(response, self.token)
+        return response
 
     async def _status(self, request: Any) -> Any:
         """What is configured, and what is stopping the conversation starting."""
@@ -155,6 +248,7 @@ class WebChatServer:
                 "keys": env_status(),  # names to booleans; never the values
                 "errors": cfg.validate(),
                 "ready": self.ready,
+                "locked": self.token is not None,
                 # Not secret, unlike the keys — the page shows and sets these.
                 "personality": {"current": cfg.personality, "available": list_personalities()},
                 "voice": {
@@ -177,6 +271,7 @@ class WebChatServer:
         body, error = await self._json_body(request)
         if body is None:
             return error
+        body.pop("WEB_CHAT_TOKEN", None)  # only through /lock, which checks it and signs in
         written = persist_env({k: str(v) for k, v in body.items()})
         errors = Config().validate()
         return JSONResponse({"written": written, "keys": env_status(), "errors": errors})
@@ -253,6 +348,9 @@ class WebChatServer:
                 Route("/", self._page),
                 Route("/settings", self._settings_page),
                 Route("/settings", self._save_settings, methods=["POST"]),
+                Route("/login", self._login, methods=["POST"]),
+                Route("/logout", self._logout, methods=["POST"]),
+                Route("/lock", self._lock, methods=["POST"]),
                 Route("/status", self._status),
                 Route("/memory", self._memory),
                 Route("/memory/forget", self._forget, methods=["POST"]),

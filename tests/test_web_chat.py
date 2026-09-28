@@ -13,7 +13,9 @@ from fast_body.web.server import MAX_MESSAGE_CHARS, WebChatServer
 
 @pytest.fixture
 def server():
-    return WebChatServer(WebChatHub(), host="127.0.0.1", port=8099, token="s3cret")
+    server = WebChatServer(WebChatHub(), host="127.0.0.1", port=8099, token="s3cret")
+    server.login_delay = 0
+    return server
 
 
 @pytest.fixture
@@ -22,19 +24,91 @@ def client(server):
 
 
 # ── access control ────────────────────────────────────────────────────────
-def test_page_needs_the_token(client):
-    assert client.get("/").status_code == 404
+def test_page_asks_for_the_password(client):
+    """The dashboard's button opens the bare URL, so that has to land somewhere useful."""
+    response = client.get("/")
+    assert response.status_code == 401
+    assert 'action="/login"' in response.text
+    assert "Stop" not in response.text  # the chat page itself is not in it
 
 
-def test_page_does_not_hint_that_it_exists(client):
+def test_wrong_token_in_the_url_asks_for_the_password(client):
+    assert client.get("/?token=wrong").status_code == 401
+
+
+def test_api_routes_do_not_hint_that_they_exist(client):
     # 404 rather than 401: an unauthenticated scan learns nothing.
-    assert client.get("/?token=wrong").status_code == 404
+    assert client.get("/status?token=wrong").status_code == 404
 
 
 def test_page_is_served_with_the_token(client):
     response = client.get("/?token=s3cret")
     assert response.status_code == 200
     assert "fast-body" in response.text
+
+
+def test_token_in_the_url_signs_the_browser_in(client):
+    client.get("/?token=s3cret")
+    assert client.get("/").status_code == 200
+    assert client.get("/status").status_code == 200
+
+
+def test_login_form_signs_the_browser_in(client):
+    response = client.post(
+        "/login",
+        data={"token": "s3cret", "next": "/settings"},
+        headers={"origin": "http://testserver"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings"
+    assert client.get("/settings").status_code == 200
+    assert client.get("/status").status_code == 200
+
+
+def test_login_form_rejects_a_wrong_password(client):
+    response = client.post("/login", data={"token": "nope", "next": "/"}, follow_redirects=False)
+    assert response.status_code == 401
+    assert "not right" in response.text
+    assert client.get("/status").status_code == 404
+
+
+def test_login_form_rejects_a_foreign_origin(client):
+    response = client.post("/login", data={"token": "s3cret"}, headers={"origin": "http://evil.example"})
+    assert response.status_code == 403
+    assert client.get("/status").status_code == 404
+
+
+def test_login_only_redirects_within_the_site(client):
+    response = client.post("/login", data={"token": "s3cret", "next": "//evil.example/x"}, follow_redirects=False)
+    assert response.headers["location"] == "/"
+
+
+def test_login_form_returns_to_the_page_asked_for(client):
+    assert 'value="/settings"' in client.get("/settings").text
+
+
+def test_cookie_opens_the_socket(client):
+    client.post("/login", data={"token": "s3cret"}, follow_redirects=False)
+    with client.websocket_connect("/ws") as ws:
+        assert ws.receive_json()["role"] == "history"
+
+
+def test_wrong_cookie_is_refused(client):
+    client.cookies.set("fast_body_session", "stale")
+    assert client.get("/status").status_code == 404
+
+
+def test_logout_forgets_this_browser(client):
+    client.post("/login", data={"token": "s3cret"}, follow_redirects=False)
+    response = client.post("/logout", json={}, headers={"origin": "http://testserver"})
+    assert response.json() == {"signed_out": True}
+    assert client.get("/status").status_code == 404
+
+
+def test_status_reports_the_lock(client, open_client):
+    assert client.get("/status?token=s3cret").json()["locked"] is True
+    assert open_client.get("/status").json()["locked"] is False
 
 
 def test_socket_needs_the_token(client):
@@ -213,8 +287,10 @@ def env_file(tmp_path, monkeypatch):
     return path
 
 
-def test_settings_page_needs_the_token(client):
-    assert client.get("/settings").status_code == 404
+def test_settings_page_asks_for_the_password(client):
+    response = client.get("/settings")
+    assert response.status_code == 401
+    assert 'action="/login"' in response.text
 
 
 def test_status_needs_the_token(client):
@@ -281,8 +357,7 @@ def test_saving_writes_the_env_file(client, env_file):
 
 def test_saving_replaces_rather_than_appends(client, env_file):
     env_file.write_text("OPENAI_API_KEY=old\nOTHER=keep\n")
-    client.post("/settings?token=s3cret", json={"OPENAI_API_KEY": "new"},
-                headers={"origin": "http://testserver"})
+    client.post("/settings?token=s3cret", json={"OPENAI_API_KEY": "new"}, headers={"origin": "http://testserver"})
     text = env_file.read_text()
     assert "OPENAI_API_KEY=new" in text
     assert "OPENAI_API_KEY=old" not in text
@@ -296,8 +371,9 @@ def test_saving_needs_the_token(client, env_file):
 
 
 def test_saving_rejects_a_foreign_origin(client, env_file):
-    r = client.post("/settings?token=s3cret", json={"OPENAI_API_KEY": "sk-nope"},
-                    headers={"origin": "http://evil.example"})
+    r = client.post(
+        "/settings?token=s3cret", json={"OPENAI_API_KEY": "sk-nope"}, headers={"origin": "http://evil.example"}
+    )
     assert r.status_code == 403
     assert not env_file.exists()
 
@@ -325,10 +401,61 @@ def test_only_whitelisted_names_are_written(client, env_file, monkeypatch):
 
 def test_blank_values_leave_existing_keys_alone(client, env_file):
     env_file.write_text("OPENAI_API_KEY=keepme\n")
-    r = client.post("/settings?token=s3cret", json={"OPENAI_API_KEY": "   "},
-                    headers={"origin": "http://testserver"})
+    r = client.post("/settings?token=s3cret", json={"OPENAI_API_KEY": "   "}, headers={"origin": "http://testserver"})
     assert r.json()["written"] == []
     assert "keepme" in env_file.read_text()
+
+
+# ── the lock ──────────────────────────────────────────────────────────────
+def test_setting_a_password_locks_the_page_and_signs_in(open_server, open_client, env_file):
+    response = open_client.post("/lock", json={"token": "correct horse"}, headers={"origin": "http://testserver"})
+    assert response.json() == {"locked": True}
+    assert open_server.token == "correct horse"
+    assert "WEB_CHAT_TOKEN=correct horse" in env_file.read_text()
+    # This browser got the cookie; a fresh one is asked.
+    assert open_client.get("/status").status_code == 200
+    assert TestClient(open_server._build_app()).get("/status").status_code == 404
+
+
+def test_short_passwords_are_refused(open_server, open_client, env_file):
+    response = open_client.post("/lock", json={"token": "abc"}, headers={"origin": "http://testserver"})
+    assert response.status_code == 400
+    assert open_server.token is None
+
+
+def test_passwords_that_would_not_survive_the_env_file_are_refused(open_server, open_client, env_file):
+    for bad in ("correct # horse", '"quoted value"'):
+        r = open_client.post("/lock", json={"token": bad}, headers={"origin": "http://testserver"})
+        assert r.status_code == 400
+    assert open_server.token is None
+
+
+def test_changing_the_password_signs_other_browsers_out(server, client, env_file):
+    other = TestClient(server._build_app())
+    other.post("/login", data={"token": "s3cret"}, follow_redirects=False)
+    assert other.get("/status").status_code == 200
+    client.post("/lock?token=s3cret", json={"token": "something new"}, headers={"origin": "http://testserver"})
+    assert other.get("/status").status_code == 404
+    assert client.get("/status").status_code == 200
+
+
+def test_removing_the_password_opens_the_page(server, client, env_file):
+    env_file.write_text("OPENAI_API_KEY=keepme\nWEB_CHAT_TOKEN=s3cret\n")
+    response = client.post("/lock?token=s3cret", json={"remove": True}, headers={"origin": "http://testserver"})
+    assert response.json() == {"locked": False}
+    assert server.token is None
+    assert env_file.read_text() == "OPENAI_API_KEY=keepme\n"
+    assert TestClient(server._build_app()).get("/status").status_code == 200
+
+
+def test_lock_needs_the_token(client, env_file):
+    assert client.post("/lock", json={"token": "hijack me"}, headers={"origin": "http://testserver"}).status_code == 404
+
+
+def test_the_settings_route_does_not_take_the_token(server, client, env_file):
+    r = client.post("/settings?token=s3cret", json={"WEB_CHAT_TOKEN": "x"}, headers={"origin": "http://testserver"})
+    assert r.json()["written"] == []
+    assert server.token == "s3cret"
 
 
 # ── the scraped literal ───────────────────────────────────────────────────
@@ -431,9 +558,7 @@ def test_forgetting_another_conversation_leaves_the_live_one_alone(open_server, 
 
 
 def test_forget_rejects_a_foreign_origin(open_client):
-    r = open_client.post(
-        "/memory/forget", json={"all": True}, headers={"origin": "http://evil.example"}
-    )
+    r = open_client.post("/memory/forget", json={"all": True}, headers={"origin": "http://evil.example"})
     assert r.status_code == 403
 
 

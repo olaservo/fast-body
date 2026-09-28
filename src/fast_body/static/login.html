@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- No no-referrer meta here: under that policy Chromium sends "Origin: null" on
+     the form POST, and the server checks Origin. Nothing secret is in this URL. -->
+<title>fast-body</title>
+<style>
+  :root {
+    --ground: #e7ecee;
+    --surface: #fbfcfc;
+    --ink: #14232a;
+    --muted: #5a7079;
+    --ok: #0b6e64;
+    --warn: #a65516;
+    --rule: rgba(20, 35, 42, 0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0e181d;
+      --surface: #172630;
+      --ink: #d9e4e7;
+      --muted: #8aa1a9;
+      --ok: #4fc3b0;
+      --warn: #e39b4a;
+      --rule: rgba(217, 228, 231, 0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 20px 64px;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+  h1 {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em;
+  }
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 16px; }
+  p { margin: 0; color: var(--muted); font-size: 14px; }
+  form { display: flex; flex-direction: column; gap: 18px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  label {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; letter-spacing: 0.04em;
+  }
+  .warn { color: var(--warn); font-size: 13px; }
+  .warn:empty { display: none; }
+  input, button {
+    font: inherit; border-radius: 4px; border: 1px solid var(--rule);
+    padding: 9px 12px; background: var(--surface); color: var(--ink);
+  }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
+  button { cursor: pointer; align-self: flex-start; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>fast-body</h1>
+    <p>This robot's page has a password. Enter it once and this browser stays signed in.</p>
+  </header>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{next}}" />
+    <div class="field">
+      <label for="token">Password</label>
+      <input type="password" id="token" name="token" autocomplete="current-password" autofocus />
+      <span class="warn">{{error}}</span>
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

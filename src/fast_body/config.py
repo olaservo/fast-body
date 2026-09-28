@@ -152,6 +152,9 @@ SETTABLE_ENV = (
     "OPENAI_TTS_VOICE",
     "FACE_TRACKING",
     "ENABLE_MEMORY",
+    # Only through the page's /lock route, which checks the length and signs the
+    # browser in; the generic /settings route refuses it.
+    "WEB_CHAT_TOKEN",
 )
 
 # Voices the OpenAI TTS API accepts, for the settings page's picker. The list
@@ -212,6 +215,21 @@ def persist_env(updates: dict[str, str]) -> list[str]:
         logger.error("could not write %s: %s", ENV_FILE, e)
 
     return sorted(written)
+
+
+def forget_env(name: str) -> None:
+    """Remove one setting from `ENV_FILE` and from this process."""
+    os.environ.pop(name, None)
+    if not ENV_FILE.is_file():
+        return
+    try:
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if not line.strip().startswith(f"{name}=")]
+        if len(kept) != len(lines):
+            ENV_FILE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            logger.info("removed %s from %s", name, ENV_FILE)
+    except OSError as e:
+        logger.error("could not rewrite %s: %s", ENV_FILE, e)
 
 
 def env_status() -> dict[str, bool]:
@@ -320,9 +338,10 @@ class Config:
     # keep it on the robot itself.
     web_chat_host: str = field(default_factory=lambda: os.getenv("WEB_CHAT_HOST", "0.0.0.0"))
     # Optional lock. Unset (the default) the page is open to the network it's
-    # bound to, like the daemon on :8000 and the conversation app on :7860 —
-    # which is what lets the desktop app's open button work, since the URL the
-    # daemon scrapes for it can't carry a token. Set a value to require it.
+    # bound to, like the daemon on :8000 and the conversation app on :7860. Set,
+    # the page asks for it once per browser and keeps a cookie, so the desktop
+    # app's open button (a bare URL scraped from main.py) still works. Also
+    # settable from the settings page, through web/server.py's /lock route.
     web_chat_token: str | None = field(default_factory=lambda: os.getenv("WEB_CHAT_TOKEN", "").strip() or None)
     # Audio-reactive head wobble while speaking (on-robot LOCAL audio backend only).
     enable_wobble: bool = field(default_factory=lambda: _flag("ENABLE_WOBBLE", True))

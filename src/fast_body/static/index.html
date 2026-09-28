@@ -192,8 +192,10 @@
   var send = document.getElementById("send");
   var stop = document.getElementById("stop");
 
+  // A token in the URL (the link the CLI logs) rides along on every call. Without
+  // one the browser is signed in by cookie, and the URLs stay clean.
   var token = new URLSearchParams(location.search).get("token") || "";
-  var q = "?token=" + encodeURIComponent(token);
+  var q = token ? "?token=" + encodeURIComponent(token) : "";
   var socket = null;
   var retry = 1000;
 
@@ -406,7 +408,7 @@
   function fetchWidget(server, uri) {
     var key = server + " " + uri;
     if (!resources[key]) {
-      resources[key] = fetch("/apps/resource" + q + "&server=" + encodeURIComponent(server) +
+      resources[key] = fetch("/apps/resource" + (q ? q + "&" : "?") + "server=" + encodeURIComponent(server) +
                              "&uri=" + encodeURIComponent(uri))
         .then(function (r) {
           if (!r.ok) throw new Error("widget unavailable (" + r.status + ")");
@@ -592,7 +594,7 @@
 
   function connect() {
     var scheme = location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(scheme + "://" + location.host + "/ws?token=" + encodeURIComponent(token));
+    socket = new WebSocket(scheme + "://" + location.host + "/ws" + q);
 
     socket.onopen = function () {
       retry = 1000;

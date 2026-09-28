@@ -71,7 +71,7 @@ mcp:
 | `FAST_BODY_VISION_MODEL` | The OpenAI model behind `examine(question)` (`gpt-5-mini`). Uses `OPENAI_API_KEY`; without one the tool says it is not configured. |
 | `ENABLE_WEB_CHAT` | `true` (default) — serve the companion browser page. Don't disable it for a daemon-installed app: the dashboard sees the advertised page never answer and stops the app after 60 s. |
 | `WEB_CHAT_PORT` / `WEB_CHAT_HOST` | `8080` / `0.0.0.0`. Use `127.0.0.1` to keep the page on the robot. Changing the port breaks the dashboard's open button, whose URL is a static literal in `main.py`. |
-| `WEB_CHAT_TOKEN` | Blank (default) — the page is open to your network, which is what lets the dashboard's open button work. Set a value to require it on every request (and go back to opening the logged URL by hand). |
+| `WEB_CHAT_TOKEN` | Blank (default) — the page is open to your network. Set a value (8+ characters), or set it from the settings page, and the page asks for it once per browser and keeps the browser signed in with a cookie, so the dashboard's open button still works. |
 | `HEAD_TRACKING_WEIGHT` | `1.0` (default) — how strongly face tracking owns the head. |
 | `HEAD_TRACKING_SPEAKING_WEIGHT` | `0.3` (default) — the same, while the robot is speaking. |
 | `ENABLE_WOBBLE` | `true` (default) — audio-reactive head sway while speaking. |
@@ -168,7 +168,9 @@ chat page: http://localhost:8080/
 
 You get the transcript live — what the mic heard and what the robot replied — and an input box that reaches the brain on the same path as speech, plus a Stop button that interrupts a reply the way Escape does in the console. Between the two, an activity line says the robot is thinking, for how long, and which step it is on (named only when the card allows it; see [Personalities](#personalities)), so a turn that is six tool calls and a minute long reads as working rather than stuck. On the robot, swap `localhost` for its address. `VOICE_BACKEND=none` turns off audio entirely and makes the page the only way in and out, which is the setup for a robot with no usable mic.
 
-There's no TLS and no user accounts. Anyone on your network can use this UI to talk through the robot, so treat it as a tool for a network you trust; `WEB_CHAT_HOST=127.0.0.1` keeps it on the robot itself.
+The page is open to your network by default, like the daemon on port 8000. Anyone who can reach it can talk through the robot and change its settings, including which MCP servers it uses. To lock it, set a password under "Who can open this page" on the settings page (or `WEB_CHAT_TOKEN` in the `.env`). From then on a browser opening the page is asked for the password once and stays signed in, so the dashboard's open button keeps working; a URL with `?token=` (the one the CLI logs) also signs the browser in. Changing the password signs every browser out, and the settings page can remove it or sign out the browser you are on.
+
+There's no TLS and no user accounts, so the password crosses your network in the clear once per browser. Treat it as a lock for a network you trust, not for the internet; `WEB_CHAT_HOST=127.0.0.1` keeps the page on the robot itself.
 
 ### fast-agent's TUI (`--tui`)
 
