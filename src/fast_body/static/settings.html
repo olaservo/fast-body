@@ -135,7 +135,7 @@
   </form>
 
   <h2>Personality cards</h2>
-  <p class="hint">Cards the robot holds besides the built-in ones. They live on the robot and survive an app update. A card is a fast-agent AgentCard: YAML frontmatter, then who the robot is.</p>
+  <p class="hint">Cards the robot holds besides the built-in ones, uploaded one at a time or installed as card packs. They live on the robot and survive an app update. A card is a fast-agent AgentCard: YAML frontmatter, then who the robot is.</p>
   <p id="cards-where" class="hint"></p>
   <div id="cards-list">reading…</div>
 
@@ -150,14 +150,16 @@
 
   <form id="pack-form">
     <div class="field">
-      <label for="pack-repo">Install a pack from Hugging Face</label>
-      <span class="hint">A repository of cards, written <code>owner/name</code>. Downloaded with the robot's own Hugging Face login, so a private repo works if that account can read it. Install again to update.</span>
-      <input type="text" id="pack-repo" autocomplete="off" spellcheck="false" placeholder="owner/my-cards" />
+      <label for="pack-source">Add a card pack</label>
+      <span class="hint">A <a href="https://fast-agent.ai">fast-agent</a> card pack: a repository holding <code>card-pack.yaml</code> packs, listed by its <code>marketplace.json</code>. Write a Hugging Face repo as <code>owner/name</code> (read with the robot's own Hugging Face login, so a private repo works if that account can read it), or a git repository or registry URL. Look up first, then install what it offers.</span>
+      <input type="text" id="pack-source" autocomplete="off" spellcheck="false" placeholder="owner/my-cards" />
     </div>
+    <div id="pack-found"></div>
     <div class="field">
       <span class="state" id="cards-note"></span>
     </div>
-    <button id="pack-install" type="submit">Install pack</button>
+    <pre id="pack-readme" class="hint" style="white-space: pre-wrap; display: none"></pre>
+    <button id="pack-lookup" type="submit">Look up</button>
   </form>
 
   <h2>MCP servers</h2>
@@ -380,8 +382,10 @@
   var cardsNote = document.getElementById("cards-note");
   var cardFile = document.getElementById("card-file");
   var cardUpload = document.getElementById("card-upload");
-  var packRepo = document.getElementById("pack-repo");
-  var packInstall = document.getElementById("pack-install");
+  var packSource = document.getElementById("pack-source");
+  var packLookup = document.getElementById("pack-lookup");
+  var packFound = document.getElementById("pack-found");
+  var packReadme = document.getElementById("pack-readme");
 
   function cardRow(text, buttons) {
     var row = document.createElement("div");
@@ -406,8 +410,9 @@
     if (data.directory) cardsWhere.textContent = "Stored in " + data.directory + ".";
     if (data.note) cardsNote.textContent = data.note;
     if (data.available) refillPersonality(data.available);
+    if (data.readme) { packReadme.textContent = data.readme; packReadme.style.display = "block"; }
     cardsList.textContent = "";
-    var cards = data.cards || [];
+    var cards = (data.cards || []).filter(function (c) { return !c.pack; });
     var packs = data.packs || [];
     if (!cards.length && !packs.length) {
       cardsList.textContent = "Only the built-in cards.";
@@ -420,14 +425,41 @@
       ));
     });
     packs.forEach(function (p) {
+      if (p.error) {
+        cardsList.appendChild(cardRow(p.name + " — pack record unreadable: " + p.error,
+          [["Remove", function () { cardsAction(postJson("/personalities/packs/remove", { name: p.name })); }]]));
+        return;
+      }
+      var buttons = [
+        ["Update", function () { cardsAction(postJson("/personalities/packs/update", { name: p.name })); }],
+        ["Remove", function () { cardsAction(postJson("/personalities/packs/remove", { name: p.name })); }],
+      ];
+      // A card edited by hand is not overwritten unless asked.
+      if (data.status === "skipped_dirty" && data.pack === p.name) {
+        buttons.unshift(["Update anyway, overwriting local edits", function () {
+          cardsAction(postJson("/personalities/packs/update", { name: p.name, force: true }));
+        }]);
+      }
       cardsList.appendChild(cardRow(
-        p.repo_id + " (" + p.repo_type + " " + (p.revision || "?") + ") — " + (p.cards.length ? p.cards.join(", ") : "no cards"),
-        [
-          ["Update", function () { cardsAction(postJson("/personalities/packs/install", { repo_id: p.repo_id, repo_type: p.repo_type })); }],
-          ["Remove", function () { cardsAction(postJson("/personalities/packs/remove", { repo_id: p.repo_id })); }],
-        ]
+        p.name + " (" + (p.revision || "?") + ") from " + p.source + " — " + (p.cards.length ? p.cards.join(", ") : "no cards"),
+        buttons
       ));
     });
+  }
+
+  function renderFound(found) {
+    packFound.textContent = "";
+    found.packs.forEach(function (p) {
+      packFound.appendChild(cardRow(
+        p.name + (p.description ? " — " + p.description : ""),
+        [["Install", function () {
+          cardsNote.textContent = "installing…";
+          cardsAction(postJson("/personalities/packs/install", { source: found.source, name: p.name }))
+            .then(function () { packFound.textContent = ""; packSource.value = ""; });
+        }]]
+      ));
+    });
+    cardsNote.textContent = found.packs.length + " pack" + (found.packs.length === 1 ? "" : "s") + " at " + found.source;
   }
 
   function cardsAction(promise) {
@@ -459,13 +491,15 @@
 
   document.getElementById("pack-form").addEventListener("submit", function (e) {
     e.preventDefault();
-    var repo = packRepo.value.trim();
-    if (!repo) { cardsNote.textContent = "Enter a repo as owner/name."; return; }
-    packInstall.disabled = true;
-    cardsNote.textContent = "downloading…";
-    cardsAction(postJson("/personalities/packs/install", { repo_id: repo })
-      .then(function (data) { packRepo.value = ""; return data; }))
-      .finally(function () { packInstall.disabled = false; });
+    var source = packSource.value.trim();
+    if (!source) { cardsNote.textContent = "Enter a repo as owner/name, or a URL."; return; }
+    packLookup.disabled = true;
+    packReadme.style.display = "none";
+    cardsNote.textContent = "looking up…";
+    postJson("/personalities/packs/lookup", { source: source })
+      .then(renderFound)
+      .catch(function (err) { packFound.textContent = ""; cardsNote.textContent = err.message; })
+      .finally(function () { packLookup.disabled = false; });
   });
 
   // ── MCP servers ───────────────────────────────────────────────────────

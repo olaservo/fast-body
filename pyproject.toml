@@ -39,8 +39,8 @@ dependencies = [
   "numpy",
   "scipy",
   "python-dotenv",
-  # Card packs are downloaded from the Hub with the robot's own login; already a
-  # fast-agent dependency, declared because we import it.
+  # A card pack named as a Hub repo is looked up with the robot's own login;
+  # already a fast-agent dependency, declared because we import it.
   "huggingface_hub>=1.0",
   "webrtcvad-wheels>=2.0.14",
 ]

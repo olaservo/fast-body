@@ -8,13 +8,11 @@ the shared embodiment guide from `prompts.py` is appended when the agent is
 built (see `agent.py`).
 
 Cards are searched in this order, most specific first: an optional external
-directory (`FAST_BODY_PERSONALITIES_DIR`); `<MEMORY_DIR>/personalities/`
-(`~/.fast-body/personalities/`, cards that are not part of the app; see
-config.py); each pack installed below it (`packs/<owner>--<repo>/`, see
+directory (`FAST_BODY_PERSONALITIES_DIR`); `<MEMORY_DIR>/agent-cards/`
+(`~/.fast-body/agent-cards/`: uploads and installed card packs, see
 personality_store.py); and the packaged `personalities/` directory next to
-this file. A card with the same stem as a
-packaged one wins, so users can override the built-ins without touching the
-install.
+this file. A card with the same stem as a packaged one wins, so users can
+override the built-ins without touching the install.
 
 A broken or missing card never stops the app: selection falls back to the
 packaged `default` card with a logged warning, because on a robot there may be
@@ -35,8 +33,11 @@ from fast_body.voice.cast import Cast
 logger = logging.getLogger(__name__)
 
 PERSONALITIES_DIR = PACKAGE_DIR / "personalities"
-# Cards that live with the robot rather than the app (see config.py).
-USER_PERSONALITIES_DIR = MEMORY_DIR / "personalities"
+# Cards that live with the robot rather than the app. MEMORY_DIR is fast-agent's
+# home (config.py) and `agent-cards/` is where fast-agent itself keeps cards
+# there, so `fast-agent cards add` on a laptop and the settings page on the
+# robot put cards in the same place.
+USER_PERSONALITIES_DIR = MEMORY_DIR / "agent-cards"
 DEFAULT_PERSONALITY = "default"
 
 # The extensions fast-agent's card loader accepts.
@@ -72,18 +73,10 @@ def _external_dir() -> Path | None:
     return Path(value) if value else None
 
 
-def _pack_dirs() -> list[Path]:
-    """Installed card packs, in a stable order (personality_store.py fills them)."""
-    root = USER_PERSONALITIES_DIR / "packs"
-    if not root.is_dir():
-        return []
-    return sorted(p for p in root.iterdir() if p.is_dir())
-
-
 def _search_dirs() -> tuple[Path, ...]:
     """Most specific first, so a user card shadows a packaged one of the same name."""
     external = _external_dir()
-    dirs = (USER_PERSONALITIES_DIR, *_pack_dirs(), PERSONALITIES_DIR)
+    dirs = (USER_PERSONALITIES_DIR, PERSONALITIES_DIR)
     return (external, *dirs) if external else dirs
 
 

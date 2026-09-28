@@ -123,8 +123,8 @@ async def mcp_delete(server: WebChatServer, request: Any) -> Any:
     return await _mcp_list_response(server, f"{name}: removed")
 
 
-# ── personalities (uploaded cards and packs) ─────────────────────────────
-def _personalities_response(note: str = "") -> Any:
+# ── personalities (uploaded cards and card packs) ────────────────────────
+def _personalities_response(note: str = "", **extra: Any) -> Any:
     """The section's whole state, returned by every route in it."""
     cfg = Config()
     return JSONResponse(
@@ -135,6 +135,7 @@ def _personalities_response(note: str = "") -> Any:
             "cards": personality_store.list_user_cards(),
             "packs": personality_store.list_packs(),
             "note": note,
+            **extra,
         }
     )
 
@@ -170,35 +171,68 @@ async def personality_delete(server: WebChatServer, request: Any) -> Any:
     return _personalities_response(f"{name}: removed")
 
 
-async def pack_install(server: WebChatServer, request: Any) -> Any:
-    """Install or update a pack from the Hub. The download runs off the loop."""
+async def _network(label: str, coro: Any) -> tuple[Any, Any]:
+    """Run a store call that reaches the network; (result, None) or (None, error response)."""
+    try:
+        return await asyncio.wait_for(coro, timeout=personality_store.NETWORK_TIMEOUT), None
+    except ValueError as e:
+        return None, JSONResponse({"error": str(e)}, status_code=400)
+    except LookupError as e:
+        return None, JSONResponse({"error": f"no card pack {e} installed"}, status_code=404)
+    except TimeoutError:
+        return None, JSONResponse({"error": f"{label} did not finish in three minutes"}, status_code=504)
+    except Exception as e:
+        logger.warning("%s failed: %s", label, e)
+        return None, JSONResponse({"error": f"{label} failed: {e}"}, status_code=502)
+
+
+async def pack_lookup(server: WebChatServer, request: Any) -> Any:
+    """What a registry offers: {source} → {source, packs: [{name, description, kind}]}."""
     body, error = await server._json_body(request)
     if body is None:
         return error
-    repo_id = str(body.get("repo_id", "")).strip()
-    repo_type = str(body.get("repo_type", "")).strip() or None
-    try:
-        note = await asyncio.wait_for(
-            asyncio.to_thread(personality_store.install_pack, repo_id, repo_type), timeout=180.0
-        )
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    except TimeoutError:
-        return JSONResponse({"error": "the download did not finish in three minutes"}, status_code=504)
-    except Exception as e:
-        logger.warning("pack %s failed: %s", repo_id, e)
-        return JSONResponse({"error": f"could not install {repo_id}: {e}"}, status_code=502)
-    return _personalities_response(note)
+    source = str(body.get("source", "")).strip()
+    found, error = await _network(f"looking up {source}", personality_store.lookup(source))
+    if found is None:
+        return error
+    return JSONResponse(found)
+
+
+async def pack_install(server: WebChatServer, request: Any) -> Any:
+    """Install one pack from a registry: {source, name, force?}."""
+    body, error = await server._json_body(request)
+    if body is None:
+        return error
+    source = str(body.get("source", "")).strip()
+    name = str(body.get("name", "")).strip()
+    force = bool(body.get("force", False))
+    done, error = await _network(f"installing {name}", personality_store.install(source, name, force))
+    if done is None:
+        return error
+    return _personalities_response(done["note"], readme=done.get("readme"))
+
+
+async def pack_update(server: WebChatServer, request: Any) -> Any:
+    """Bring one installed pack up to its source: {name, force?}."""
+    body, error = await server._json_body(request)
+    if body is None:
+        return error
+    name = str(body.get("name", "")).strip()
+    force = bool(body.get("force", False))
+    done, error = await _network(f"updating {name}", personality_store.update(name, force))
+    if done is None:
+        return error
+    return _personalities_response(done["note"], status=done["status"], pack=name)
 
 
 async def pack_remove(server: WebChatServer, request: Any) -> Any:
     body, error = await server._json_body(request)
     if body is None:
         return error
-    repo_id = str(body.get("repo_id", "")).strip()
-    if not personality_store.remove_pack(repo_id):
-        return JSONResponse({"error": f"no pack {repo_id} installed"}, status_code=404)
-    return _personalities_response(f"{repo_id}: removed")
+    name = str(body.get("name", "")).strip()
+    if not personality_store.remove(name):
+        return JSONResponse({"error": f"no card pack {name} installed"}, status_code=404)
+    return _personalities_response(f"{name}: removed")
 
 
 def routes(server: WebChatServer) -> list[Route]:
@@ -210,6 +244,8 @@ def routes(server: WebChatServer) -> list[Route]:
         Route("/personalities", partial(personalities, server)),
         Route("/personalities/upload", partial(personality_upload, server), methods=["POST"]),
         Route("/personalities/delete", partial(personality_delete, server), methods=["POST"]),
+        Route("/personalities/packs/lookup", partial(pack_lookup, server), methods=["POST"]),
         Route("/personalities/packs/install", partial(pack_install, server), methods=["POST"]),
+        Route("/personalities/packs/update", partial(pack_update, server), methods=["POST"]),
         Route("/personalities/packs/remove", partial(pack_remove, server), methods=["POST"]),
     ]

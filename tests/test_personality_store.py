@@ -1,11 +1,13 @@
-"""Cards that reach the robot from the settings page: uploads and Hub packs."""
+"""Cards that reach the robot from the settings page: uploads and card packs."""
 
 from __future__ import annotations
 
-import types
+import json
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
-import yaml
 from starlette.testclient import TestClient
 
 from fast_body import personality, personality_store
@@ -18,7 +20,8 @@ CARD = "---\ntype: agent\nvariables:\n  voice: onyx\n---\nYou keep an inn.\n"
 
 @pytest.fixture
 def user_dir(tmp_path, monkeypatch):
-    path = tmp_path / "personalities"
+    """`agent-cards/` under a scratch fast-agent home."""
+    path = tmp_path / "home" / "agent-cards"
     monkeypatch.setattr(personality, "USER_PERSONALITIES_DIR", path)
     monkeypatch.delenv("FAST_BODY_PERSONALITIES_DIR", raising=False)
     return path
@@ -29,7 +32,7 @@ def test_an_uploaded_card_is_stored_and_listed(user_dir):
     assert personality_store.save_card("innkeeper.md", CARD) is None
     assert (user_dir / "innkeeper.md").read_text(encoding="utf-8") == CARD
     assert personality_store.list_user_cards() == [
-        {"name": "innkeeper", "file": "innkeeper.md", "shadows_builtin": False}
+        {"name": "innkeeper", "file": "innkeeper.md", "shadows_builtin": False, "pack": None}
     ]
     assert "innkeeper" in list_personalities()
     assert load_personality("innkeeper").voice == "onyx"
@@ -62,109 +65,193 @@ def test_delete_only_touches_uploads(user_dir):
     assert not personality_store.delete_card("nobody")
 
 
-# ── packs ─────────────────────────────────────────────────────────────────
-class FakeHub:
-    """Stands in for huggingface_hub: one dataset repo holding two cards and a README."""
+# ── card packs ────────────────────────────────────────────────────────────
+def _git(repo: Path, *args: str) -> str:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env).stdout
 
-    def __init__(self, repos: dict[tuple[str, str], dict[str, str]], sha: str = "abc1234def"):
-        self.repos = repos
-        self.sha = sha
-        self.downloads: list[tuple[str, str]] = []
 
-    def repo_info(self, repo_id, repo_type=None, **_):
-        from huggingface_hub.errors import RepositoryNotFoundError
-
-        if (repo_id, repo_type) not in self.repos:
-            import httpx
-
-            response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/api"))
-            raise RepositoryNotFoundError(f"404 {repo_id}", response=response)
-        return types.SimpleNamespace(sha=self.sha)
-
-    def snapshot_download(self, repo_id, repo_type=None, local_dir=None, allow_patterns=None, **_):
-        import fnmatch
-        from pathlib import Path
-
-        self.downloads.append((repo_id, repo_type))
-        for name, text in self.repos[(repo_id, repo_type)].items():
-            if any(fnmatch.fnmatch(name, pat) for pat in allow_patterns or ["*"]):
-                (Path(local_dir) / name).write_text(text, encoding="utf-8")
-        return local_dir
+def _pack(repo: Path, name: str, cards: dict[str, str], manifest_extra: str = "", readme: str | None = None) -> None:
+    root = repo / "packs" / name
+    root.mkdir(parents=True)
+    for file, text in cards.items():
+        (root / file).write_text(text, encoding="utf-8")
+    listed = "\n".join(f"    - {f}" for f in cards if personality.is_card_file(root / f))
+    (root / "card-pack.yaml").write_text(
+        f"schema_version: 1\nname: {name}\nkind: card\ninstall:\n  agent_cards:\n{listed}\n{manifest_extra}",
+        encoding="utf-8",
+    )
+    if readme:
+        (root / "README.md").write_text(readme, encoding="utf-8")
 
 
 @pytest.fixture
-def hub(monkeypatch):
+def registry(tmp_path):
+    """A git repo of card packs with a marketplace.json, the shape fast-agent reads.
+
+    Returned as a `file:` URL, which is what the store makes of a local path.
+    """
+    repo = tmp_path / "cards-repo"
+    repo.mkdir()
+    _pack(repo, "bard", {"bard.md": CARD}, readme="# bard\n\nSings.\n")
+    _pack(repo, "sage", {"sage.yaml": "type: agent\ninstruction: Be wise.\n"})
+    _pack(
+        repo,
+        "sneaky",
+        {"gm.md": CARD, "mcp_servers.yaml": "servers: {}\n"},
+        manifest_extra="  files:\n    - mcp_servers.yaml\n",
+    )
+    entries = [
+        {
+            "name": n,
+            "description": d,
+            "kind": "card",
+            "repo_url": str(repo),
+            "repo_ref": "main",
+            "repo_path": f"packs/{n}",
+        }
+        for n, d in (("bard", "a singer"), ("sage", "a thinker"), ("sneaky", "brings a file"))
+    ]
+    (repo / "marketplace.json").write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "packs")
+    return repo
+
+
+async def test_lookup_lists_what_a_registry_offers(user_dir, registry):
+    found = await personality_store.lookup(str(registry))
+    assert [p["name"] for p in found["packs"]] == ["bard", "sage", "sneaky"]
+    assert found["packs"][0]["description"] == "a singer"
+    assert found["source"].endswith("marketplace.json")  # fast-agent hands back the file it read
+
+
+async def test_lookup_needs_a_registry(user_dir, tmp_path):
+    with pytest.raises(ValueError, match="enter a"):
+        await personality_store.lookup("")
+    with pytest.raises(ValueError, match="no registry"):
+        await personality_store.lookup(str(tmp_path / "nowhere"))
+
+
+async def test_a_pack_installs_its_cards_through_fast_agent(user_dir, registry):
+    done = await personality_store.install(str(registry), "bard")
+    assert done["note"].startswith("installed bard (") and done["note"].endswith("): bard")
+    assert done["readme"].startswith("# bard")
+    assert (user_dir / "bard.md").read_text(encoding="utf-8") == CARD
+    assert (user_dir.parent / "card-packs" / "bard" / "card-pack.yaml").is_file()
+    assert "bard" in list_personalities() and load_personality("bard").voice == "onyx"
+    (listed,) = personality_store.list_packs()
+    assert (listed["name"], listed["cards"], len(listed["revision"])) == ("bard", ["bard"], 7)
+    # the card is the pack's: not an upload to remove or overwrite one at a time
+    assert personality_store.list_user_cards()[0]["pack"] == "bard"
+    assert not personality_store.delete_card("bard")
+    assert "belongs to the card pack bard" in (personality_store.save_card("bard.md", CARD) or "")
+
+
+async def test_a_pack_that_brings_more_than_cards_is_refused(user_dir, registry):
+    with pytest.raises(ValueError, match="more than cards"):
+        await personality_store.install(str(registry), "sneaky")
+    assert personality_store.list_packs() == []
+    assert not (user_dir / "gm.md").exists()
+    assert not (user_dir.parent / "mcp_servers.yaml").exists()
+
+
+async def test_unknown_pack_is_refused(user_dir, registry):
+    with pytest.raises(ValueError, match="no pack called"):
+        await personality_store.install(str(registry), "nobody")
+
+
+async def test_update_follows_the_source_and_keeps_local_edits(user_dir, registry):
+    await personality_store.install(str(registry), "bard")
+    assert (await personality_store.update("bard"))["status"] == "up_to_date"
+    (registry / "packs" / "bard" / "bard.md").write_text(CARD.replace("onyx", "ash"), encoding="utf-8")
+    _git(registry, "commit", "-qam", "new voice")
+    done = await personality_store.update("bard")
+    assert done["status"] == "updated" and load_personality("bard").voice == "ash"
+    # an edit on the robot is not overwritten unless asked
+    (user_dir / "bard.md").write_text(CARD.replace("onyx", "coral"), encoding="utf-8")
+    (registry / "packs" / "bard" / "bard.md").write_text(CARD.replace("onyx", "sage"), encoding="utf-8")
+    _git(registry, "commit", "-qam", "another")
+    assert (await personality_store.update("bard"))["status"] == "skipped_dirty"
+    assert load_personality("bard").voice == "coral"
+    assert (await personality_store.update("bard", force=True))["status"] == "updated"
+    assert load_personality("bard").voice == "sage"
+    with pytest.raises(LookupError):
+        await personality_store.update("nobody")
+
+
+async def test_remove_drops_the_pack_and_its_cards(user_dir, registry):
+    await personality_store.install(str(registry), "bard")
+    assert personality_store.remove("bard")
+    assert not (user_dir / "bard.md").exists()
+    assert "bard" not in list_personalities()
+    assert personality_store.list_packs() == []
+    assert not personality_store.remove("bard")
+
+
+async def test_a_hub_repo_id_is_read_with_the_robots_login(user_dir, registry, tmp_path, monkeypatch):
+    """`owner/name` resolves through the Hub API, and its marketplace.json is fetched with the token."""
+    import huggingface_hub
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    calls: list[tuple[str, str | None]] = []
+
+    def repo_info(self, repo_id, repo_type=None, **_):
+        calls.append((repo_id, repo_type))
+        if (repo_id, repo_type) != ("ola/cards", "model"):
+            import httpx
+
+            raise RepositoryNotFoundError(
+                "404", response=httpx.Response(404, request=httpx.Request("GET", "https://x"))
+            )
+
+    def download(repo_id, filename, repo_type=None, **_):
+        assert (repo_id, filename, repo_type) == ("ola/cards", "marketplace.json", "model")
+        return str(registry / "marketplace.json")
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "repo_info", repo_info)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    found = await personality_store.lookup("ola/cards")
+    assert found["source"] == "https://huggingface.co/ola/cards"  # a model repo's git URL has no prefix
+    assert calls == [("ola/cards", "dataset"), ("ola/cards", "model")]
+    assert (await personality_store.install("ola/cards", "bard"))["note"].startswith("installed bard")
+    # a dataset URL is taken as such
+    assert personality_store._hf_repo("https://huggingface.co/datasets/ola/cards") == ("ola/cards", "dataset")
+    assert personality_store._hf_repo("https://github.com/ola/cards") is None
+
+
+def test_git_is_given_the_hub_login_through_the_environment(monkeypatch, tmp_path):
     import huggingface_hub
 
-    fake = FakeHub(
-        {
-            ("ola/cards", "dataset"): {"README.md": "# cards\n", "bard.md": CARD, "sage.yaml": "type: agent\ninstruction: Be wise.\n"},
-            ("ola/model-cards", "model"): {"gm.md": CARD},
-            ("ola/empty", "dataset"): {"README.md": "# nothing\n"},
-        }
-    )
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake.snapshot_download)
-    monkeypatch.setattr(huggingface_hub.HfApi, "repo_info", lambda self, *a, **k: fake.repo_info(*a, **k))
-    return fake
+    monkeypatch.setattr(personality_store, "_git_env_done", False)
+    for key in [k for k in os.environ if k.startswith("GIT_CONFIG") or k == "GIT_TERMINAL_PROMPT"]:
+        monkeypatch.delenv(key)
+    token_file = tmp_path / "token"
+    monkeypatch.setattr(huggingface_hub.constants, "HF_TOKEN_PATH", str(token_file))
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_secret")
+    personality_store.export_git_env()
+    assert os.environ["GIT_TERMINAL_PROMPT"] == "0"
+    assert os.environ["GIT_CONFIG_COUNT"] == "1"
+    assert os.environ["GIT_CONFIG_KEY_0"] == "credential.https://huggingface.co.helper"
+    helper = os.environ["GIT_CONFIG_VALUE_0"]
+    assert token_file.as_posix() in helper and "hf_secret" not in helper
+    # once per process
+    personality_store.export_git_env()
+    assert os.environ["GIT_CONFIG_COUNT"] == "1"
 
 
-def test_a_pack_installs_its_cards_and_is_recorded(user_dir, hub):
-    note = personality_store.install_pack("ola/cards")
-    assert note.startswith("installed ola/cards (abc1234)") and "bard, sage" in note
-    pack = user_dir / "packs" / "ola--cards"
-    assert (pack / "bard.md").is_file() and (pack / "sage.yaml").is_file()
-    assert (pack / "README.md").exists()  # has the suffix, comes down, is not a card
-    recorded = yaml.safe_load((user_dir / "packs" / "packs.yaml").read_text())["packs"]["ola/cards"]
-    assert (recorded["repo_type"], recorded["sha"]) == ("dataset", "abc1234def")
-    assert {"bard", "sage"} <= set(list_personalities())
-    assert load_personality("bard").voice == "onyx"
-    (listed,) = personality_store.list_packs()
-    assert (listed["repo_id"], listed["cards"], listed["revision"]) == ("ola/cards", ["bard", "sage"], "abc1234")
-
-
-def test_repo_type_is_found_by_trying_in_order(user_dir, hub):
-    personality_store.install_pack("ola/model-cards")
-    assert hub.downloads == [("ola/model-cards", "model")]
-
-
-def test_a_pack_with_no_cards_is_refused_and_not_kept(user_dir, hub):
-    with pytest.raises(ValueError, match="no card files"):
-        personality_store.install_pack("ola/empty")
-    assert not (user_dir / "packs" / "ola--empty").exists()
-    assert personality_store.list_packs() == []
-
-
-def test_unknown_repo_and_bad_ids_are_refused(user_dir, hub):
-    with pytest.raises(ValueError, match="no repo called"):
-        personality_store.install_pack("ola/nowhere")
-    with pytest.raises(ValueError, match="owner/name"):
-        personality_store.install_pack("not a repo")
-    with pytest.raises(ValueError, match="owner/name"):
-        personality_store.install_pack("../../etc")
-
-
-def test_installing_again_reports_current_or_updated(user_dir, hub):
-    personality_store.install_pack("ola/cards")
-    assert personality_store.install_pack("ola/cards").startswith("ola/cards is current")
-    hub.sha = "def5678abc"
-    assert personality_store.install_pack("ola/cards").startswith("updated ola/cards (def5678)")
-
-
-def test_remove_pack_drops_directory_and_record(user_dir, hub):
-    personality_store.install_pack("ola/cards")
-    assert personality_store.remove_pack("ola/cards")
-    assert not (user_dir / "packs" / "ola--cards").exists()
-    assert "bard" not in list_personalities()
-    assert not personality_store.remove_pack("ola/cards")
-
-
-def test_a_readme_in_a_pack_is_not_a_personality(user_dir):
-    pack = user_dir / "packs" / "x--y"
-    pack.mkdir(parents=True)
-    (pack / "README.md").write_text("# not a card\n", encoding="utf-8")
-    (pack / "bard.md").write_text(CARD, encoding="utf-8")
-    names = list_personalities()
-    assert "bard" in names and "README" not in names
+def test_no_token_means_no_helper(monkeypatch):
+    monkeypatch.setattr(personality_store, "_git_env_done", False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
+    personality_store.export_git_env()
+    assert "GIT_CONFIG_COUNT" not in os.environ
 
 
 # ── the routes ────────────────────────────────────────────────────────────
@@ -191,12 +278,20 @@ def test_routes_upload_list_and_delete(client, user_dir):
 def test_routes_need_the_token(client):
     assert client.get("/personalities").status_code == 404
     assert client.post("/personalities/upload", json={}).status_code == 404
+    assert client.post("/personalities/packs/lookup", json={}).status_code == 404
 
 
-def test_routes_install_and_remove_a_pack(client, user_dir, hub):
-    r = _post(client, "/personalities/packs/install", {"repo_id": "ola/cards"})
-    assert r.status_code == 200 and r.json()["packs"][0]["cards"] == ["bard", "sage"]
-    bad = _post(client, "/personalities/packs/install", {"repo_id": "ola/nowhere"})
-    assert bad.status_code == 400 and "no repo called" in bad.json()["error"]
-    assert _post(client, "/personalities/packs/remove", {"repo_id": "ola/cards"}).json()["packs"] == []
-    assert _post(client, "/personalities/packs/remove", {"repo_id": "ola/cards"}).status_code == 404
+def test_routes_look_up_install_update_and_remove_a_pack(client, user_dir, registry):
+    found = _post(client, "/personalities/packs/lookup", {"source": str(registry)})
+    assert found.status_code == 200 and [p["name"] for p in found.json()["packs"]] == ["bard", "sage", "sneaky"]
+    bad = _post(client, "/personalities/packs/lookup", {"source": str(registry.parent / "nowhere")})
+    assert bad.status_code == 400 and "no registry" in bad.json()["error"]
+    r = _post(client, "/personalities/packs/install", {"source": found.json()["source"], "name": "bard"})
+    assert r.status_code == 200
+    assert r.json()["packs"][0]["cards"] == ["bard"] and r.json()["readme"].startswith("# bard")
+    assert _post(client, "/personalities/packs/install", {"source": str(registry), "name": "sneaky"}).status_code == 400
+    up = _post(client, "/personalities/packs/update", {"name": "bard"})
+    assert up.status_code == 200 and up.json()["status"] == "up_to_date" and up.json()["pack"] == "bard"
+    assert _post(client, "/personalities/packs/update", {"name": "nobody"}).status_code == 404
+    assert _post(client, "/personalities/packs/remove", {"name": "bard"}).json()["packs"] == []
+    assert _post(client, "/personalities/packs/remove", {"name": "bard"}).status_code == 404

@@ -4,11 +4,10 @@
 
 fast-agent is the brain; the Reachy Mini is its body. You talk to the robot, a fast-agent reasons about what to say *and how to move*, and the robot speaks and expresses itself physically — turning its head, flicking its antennas, playing emotions and dances, following your face, looking through its camera.
 
-This is the spiritual successor to [hermes-body](https://github.com/The-Focus-AI/hermes-body), rebuilt to be:
+Built to be:
 
-- **Provider-agnostic** — pick any model (Anthropic, OpenAI, Google, local) in `fast-agent.config.yaml`; the body doesn't care which brain is reasoning.
-- **MCP-native** — give the robot new abilities (home automation, web search, memory, …) by adding MCP servers, not bespoke bridge code.
-- **Swappable voice** — speech in/out lives behind one small interface, and the TTS provider behind a smaller one (`Speaker`: text in, PCM out). OpenAI today, or any server that speaks its API; a local stack is one more class.
+- **Provider-agnostic** — pick any model and a variety of providers (Anthropic, OpenAI, Google, Hugging Face providers, local) in `fast-agent.config.yaml`.
+- **MCP-native** — give the robot new abilities (home automation, web search, memory, …) by adding MCP servers to connect skills and tools.  The companion web UI also renders MCP Apps.
 
 Why it is built this way, and how it compares to the other Reachy Mini agent apps: [docs/design.md](docs/design.md).
 
@@ -125,9 +124,9 @@ variables:
 You are a robot of staggering intelligence and no enthusiasm whatsoever. …
 ```
 
-Cards carry only character; the shared embodiment guide in `prompts.py` (what the body is, the movement tools, how to gesture) is appended to every card, so a card never has to repeat it. A card may also set `model:` (overriding `default_model` for that persona), `servers:` (extra MCP servers from `fast-agent.config.yaml`), and a speaking voice under `variables:` — a field the AgentCard schema reserves for app-defined data. A card sets two separate things about the sound: `voice` is *which* voice, and `delivery` is *how* to speak — tone, pace, whether sentences lift or fall. Delivery is passed to the TTS model as `instructions`, so a card carries character in the sound and not only in the words; the older `tts-1` models reject the field, so it is only sent when a card sets one. Both resolve the same way — `OPENAI_TTS_VOICE` / `TTS_DELIVERY` override → card → default — and the settings page has pickers for the voice and the persona (with `auto` meaning "follow the card").
+A card may also set `model:` (overriding `default_model` for that persona), `servers:` (extra MCP servers from `fast-agent.config.yaml`), and a speaking voice under `variables:` — a field the AgentCard schema reserves for app-defined data. A card sets two separate things about the sound: `voice` is *which* voice, and `delivery` is *how* to speak — tone, pace, whether sentences lift or fall. Delivery is passed to the TTS model as `instructions`, so a card carries character in the sound and not only in the words; the older `tts-1` models reject the field, so it is only sent when a card sets one. Both resolve the same way — `OPENAI_TTS_VOICE` / `TTS_DELIVERY` override → card → default — and the settings page has pickers for the voice and the persona (with `auto` meaning "follow the card").
 
-A card can also say what the chat page may call a tool call while it runs, under `variables.activity`: a map from tool name to a short label, `dance: striking up a tune`. The page marks every tool call as a step of the current turn; a tool the card lists is shown by its label, any other as an unnamed step. The card decides which tool names the table can see, and nothing about a call's arguments or result is shown either way.
+A card can also say what the chat page may call a tool call while it runs, under `variables.activity`: a map from tool name to a short label, `dance: striking up a tune`.
 
 A card can also carry a **cast**: other characters the robot voices, each with a voice and a delivery, for a persona that narrates a scene. The brain marks a character's line with the name in square brackets, `[Innkeeper] We're closed.`, and the voice layer speaks each stretch of the reply in the right voice, in order; `[narrator]` (or the card's own name) returns to the card's voice. Names match loosely and can have aliases; an unknown name is spoken in the card's voice with a logged warning. The rule is added to the instruction automatically when a card has a cast, so the card itself only lists the characters.
 
@@ -144,7 +143,7 @@ variables:
 
 The shipped `tavern` card is that example in full: a storyteller who voices an innkeeper and a bard, and a starting point for a card of your own.
 
-Write your own and add it from the settings page: **Upload a card** stores the file in `~/.fast-body/personalities/` on the robot, and **Install a pack from Hugging Face** downloads a repository of cards (`owner/name`) into a folder below it using the robot's own Hugging Face login, so a private repo works the way a private Space does for an MCP server; Install again to update, Remove to drop it. Both survive an app update or remove and appear in the personality dropdown at once. A card with the same filename as a built-in replaces it. For development, `FAST_BODY_PERSONALITIES_DIR` names a directory searched before all of these. Cards that should not ship with the app (a persona tied to private content or to one household's servers) belong in a repository of their own, installed as a pack. A broken or missing card never stops the app — it falls back to `default` with a logged warning, since a robot may have no terminal to fix it from.
+Write your own and add it from the settings page: **Upload a card** stores the file in `~/.fast-body/agent-cards/` on the robot, and **Add a card pack** installs a [fast-agent card pack](https://fast-agent.ai) — a repository holding `card-pack.yaml` directories under `packs/`, listed by a `marketplace.json` — through fast-agent's own pack manager, so the same repo installs on a laptop with `fast-agent cards add`. Write a Hugging Face repo as `owner/name` (read with the robot's own Hugging Face login, so a private repo works the way a private Space does for an MCP server), or give a git repository or registry URL; Look up shows what it offers, Install brings a pack's cards in, Update pulls a new revision without overwriting a card edited on the robot unless asked, Remove takes the pack and its cards out. A pack may only bring cards: one that also wants to install tool cards or files is refused. Cards that should not ship with the app (such as a persona tied to private content or to one household's servers) belong in a repository of their own, installed as a pack.
 
 ## Run
 
@@ -159,15 +158,6 @@ fast-body --debug      # verbose logs
 fast-body --tui --personality marvin --voice marin   # per-run persona/voice overrides
 ```
 
-### One controller at a time
-
-Exactly one process may command the body. A second one interleaves its targets with the first — observed as the antennas thrashing between two streams. Two setups cause it, and the CLI guards against both:
-
-- **The desktop app is open.** It runs a daemon on this machine, and the SDK's auto mode tries localhost before the robot, so the CLI connects to the wrong daemon. fast-body logs which daemon it connected to and warns on a localhost hit; quit the desktop app, or pass `--host <robot-address>` to force the network path.
-- **The daemon is already running an app** (a deployed fast-body included). The CLI refuses to start and names the app; stop it from the dashboard, or rerun with `--take-over` to stop it and take control.
-
-On a robot, install the app and launch it from the Reachy Mini dashboard (port 8000); it's registered as a `reachy_mini_apps` entry point named `fast_body` (`fast_body.app:FastBodyApp`). The entry-point name must stay equal to both the package dir and the HF Space name: the daemon finds the page URL by scraping `site-packages/<entry-point-name>/main.py`, and resolves an installed Space by the entry point named like it.
-
 ### Companion page
 
 The app serves a chat page on `WEB_CHAT_PORT` (8080) in both run modes. Under the daemon, the desktop app and dashboard show an open button for it while the app is running (the daemon scrapes the URL from the `custom_app_url` literal in `main.py`). From the CLI, the startup log prints the URL:
@@ -178,13 +168,7 @@ chat page: http://localhost:8080/
 
 You get the transcript live — what the mic heard and what the robot replied — and an input box that reaches the brain on the same path as speech, plus a Stop button that interrupts a reply the way Escape does in the console. Between the two, an activity line says the robot is thinking, for how long, and which step it is on (named only when the card allows it; see [Personalities](#personalities)), so a turn that is six tool calls and a minute long reads as working rather than stuck. On the robot, swap `localhost` for its address. `VOICE_BACKEND=none` turns off audio entirely and makes the page the only way in and out, which is the setup for a robot with no usable mic.
 
-**Access control.**
-
-- By default there is no token, matching the platform: the daemon on :8000 and the conversation app's pages are equally open to the LAN, and the daemon can install and run arbitrary apps — so a lock here alone would not keep a hostile network off the robot. This is also what lets the open button work: the URL the daemon scrapes is a static literal and can't carry a secret. Set `WEB_CHAT_TOKEN` to require a token on every request (requests without it get a 404, not a 401 — but the open button then leads to that 404, so you're back to the logged URL).
-- WebSockets aren't covered by the same-origin policy, so any site you visit could otherwise open a socket to your robot. Sockets carrying an `Origin` from another host are refused.
-- Messages are capped at 2000 characters, and the page renders every line with `textContent` — model output is never parsed as markup.
-
-There's no TLS and no user accounts. Anyone on your network can talk through the robot, so treat it as a tool for a network you trust; `WEB_CHAT_HOST=127.0.0.1` keeps it on the robot itself.
+There's no TLS and no user accounts. Anyone on your network can use this UI to talk through the robot, so treat it as a tool for a network you trust; `WEB_CHAT_HOST=127.0.0.1` keeps it on the robot itself.
 
 ### fast-agent's TUI (`--tui`)
 
@@ -209,7 +193,7 @@ fast-body --sim --console
 
 Needs `OPENAI_API_KEY` (voice). The default `hf.` model needs no other key; a different `default_model` needs its provider's key (e.g. `ANTHROPIC_API_KEY` for `sonnet`). `--console` implies the mic+TTS backend, so it takes precedence over `--text`.
 
-Run it from a real interactive terminal (Windows Terminal, PowerShell, a TTY), not a piped shell — prompt_toolkit needs a real TTY. fast-body's own INFO log lines are quieted in console mode so they don't step on the prompt; add `--debug` if you want them back. There is a brief (under about 0.5 s) delay before Esc registers, while prompt_toolkit disambiguates it from arrow and Alt sequences, and an Esc at an idle prompt is a no-op. Each listen turn races the mic against the prompt for up to about 30 s of mic idle, then re-listens; this is normal and invisible.
+Run it from a real interactive terminal (Windows Terminal, PowerShell, a TTY since prompt_toolkit needs a real TTY. fast-body's own INFO log lines are quieted in console mode so they don't step on the prompt; add `--debug` if you want them back. There is a brief (under about 0.5 s) delay before Esc registers, while prompt_toolkit disambiguates it from arrow and Alt sequences, and an Esc at an idle prompt is a no-op. Each listen turn races the mic against the prompt for up to about 30 s of mic idle, then re-listens.
 
 ### Quickest smoke test (no robot, no mic)
 
@@ -230,69 +214,3 @@ uv run mypy src
 ```
 
 CI runs the same three commands on every push.
-
-## Layout
-
-```
-src/fast_body/
-  config.py            typed config (.env), the ~/.fast-body home
-  prompts.py           shared embodiment instruction (body capabilities), cast rule
-  personality.py       personality cards (fast-agent AgentCards): search dirs, fallback
-  personality_store.py uploaded cards and Hub card packs (settings page)
-  personalities/       the shipped cards (default / marvin / tavern)
-  memory.py            session store home, resume policy, context budget
-  mcp_servers.py       the settings page's MCP server list: store, attach, warm-up, retry
-  skills.py            skill directories, sync from MCP servers (SEP-2640)
-  choices.py           elicitation handler: a server's question, answered by voice or on the page
-  turn_speech.py       speaks a turn's text ahead of each tool call
-  agent.py             the FastAgent brain + tool registration
-  app.py               FastBodyCore conversation loop + FastBodyApp daemon entry
-  main.py              CLI (--sim / --text / --console / --tui / --debug)
-  voice/
-    base.py            VoiceBackend protocol + build_backend factory
-    speaker.py         Speaker protocol (text -> PCM) + OpenAISpeaker
-    cast.py            a card's cast: [Name]-tagged replies spoken one voice at a time
-    openai_backend.py  VAD + OpenAI STT/TTS over the robot audio; speak() shared by all
-    realtime_backend.py  streaming OpenAI transcription session + the same TTS
-    text_backend.py    line-buffered stdin (--text)
-    null_backend.py    no mic, no speaker (browser page only)
-    console_input.py   prompt_toolkit layer (typed input + Escape) for --console
-    dual_backend.py    DualVoiceBackend: race typed vs spoken
-  embodiment/
-    moves.py           100 Hz MovementManager + Move types + idle breathing
-    context.py         RobotContext the tools use to reach the live robot
-    tools.py           @fast.tool body controls (look/antennas/emotion/dance/look_at_me/camera/examine/stop)
-    cues.py            conversation-state -> antenna gesture (listen/think/speak)
-    gaze.py            daemon-side face tracking on/off + speaking weight (look_at_me)
-    vision.py          examine(): one question to a small vision model
-  web/
-    hub.py             browser <-> conversation handoff across the two event loops
-    server.py          starlette pages + websocket, status and memory routes
-    access.py          token and origin checks shared by the routes
-    settings_routes.py settings API: MCP servers, personality cards and packs
-    app_routes.py      MCP Apps routes: widget resources, widget calls, choices
-    apps.py            the chat page as an MCP Apps host (tool widgets)
-  static/
-    index.html         the companion chat page
-    settings.html      keys, voice, persona, MCP servers, memory
-docs/
-  design.md            why it is built this way, and how it compares
-scripts/
-  realtime_smoke.py    realtime STT against OpenAI, no robot
-  session_probe.py     typed turns over the chat socket + daemon journal
-```
-
-## Roadmap
-
-Voice, in rough order of how much it costs us today:
-
-- First audible sound sooner. `VOICE_BACKEND=realtime` covers server-side endpointing and partial transcripts; what it can't give is first-token audio, which needs a speech-to-speech session generating the reply.
-- A latency budget. Turn latency and per-turn usage are logged but nothing targets a number. The page and the antennas show that the robot is working; nothing is spoken while it does, so at the speaker a slow turn is still silence.
-- Push-to-talk (antenna hold) and/or a wake word, to close the always-open mic against room noise. Not an echo fix: the robot already cancels its own voice on its built-in speaker.
-- A local voice backend (STT and TTS) behind the same `VoiceBackend`, for a robot that talks with no cloud in the loop. The `Speaker` seam exists; a local STT does not.
-
-Everything else:
-
-- Long-term memory: facts recalled across conversations, not just the transcript of a recent one. [Memory](#memory) carries a conversation over a restart; what it doesn't do is remember your name a week later. That is an MCP memory server's job, and the brain can already attach one.
-- Settings that apply without an app restart, and a restart button for the ones that can't.
-- A public Space, so the app installs from the dashboard like the others.

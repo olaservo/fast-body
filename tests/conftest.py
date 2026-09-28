@@ -9,10 +9,14 @@ from reachy_mini.utils import create_head_pose
 
 @pytest.fixture(autouse=True)
 def _no_user_personalities(tmp_path, monkeypatch):
-    """Keep the developer's own ~/.fast-body/personalities out of every test."""
+    """Keep the developer's own ~/.fast-body/agent-cards out of every test.
+
+    The parent of this directory stands in for the fast-agent home, so card
+    packs land under it too (personality_store.home_paths).
+    """
     from fast_body import personality
 
-    monkeypatch.setattr(personality, "USER_PERSONALITIES_DIR", tmp_path / "user-personalities")
+    monkeypatch.setattr(personality, "USER_PERSONALITIES_DIR", tmp_path / "home" / "agent-cards")
 
 
 class FakeRobot:
