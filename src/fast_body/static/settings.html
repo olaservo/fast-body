@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>fast-body settings</title>
+<style>
+  :root {
+    --ground: #e7ecee;
+    --surface: #fbfcfc;
+    --ink: #14232a;
+    --muted: #5a7079;
+    --ok: #0b6e64;
+    --warn: #a65516;
+    --rule: rgba(20, 35, 42, 0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0e181d;
+      --surface: #172630;
+      --ink: #d9e4e7;
+      --muted: #8aa1a9;
+      --ok: #4fc3b0;
+      --warn: #e39b4a;
+      --rule: rgba(217, 228, 231, 0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    padding: 32px 20px 64px;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+  h1 {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em;
+  }
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 16px; }
+  p { margin: 0; color: var(--muted); font-size: 14px; }
+  a { color: var(--ok); }
+  .banner {
+    border: 1px solid var(--rule); border-radius: 4px; padding: 12px 14px;
+    background: var(--surface); font-size: 14px;
+  }
+  .banner.warn { border-left: 3px solid var(--warn); }
+  .banner.ok { border-left: 3px solid var(--ok); }
+  form { display: flex; flex-direction: column; gap: 18px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  label {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; letter-spacing: 0.04em;
+  }
+  .hint { font-size: 12.5px; color: var(--muted); }
+  .state { font-size: 12px; color: var(--muted); }
+  .state.set { color: var(--ok); }
+  input, select, button {
+    font: inherit; border-radius: 4px; border: 1px solid var(--rule);
+    padding: 9px 12px; background: var(--surface); color: var(--ink);
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
+  button { cursor: pointer; align-self: flex-start; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  code {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>fast-body settings</h1>
+    <p>Keys are written to the app's <code>.env</code> and applied immediately. Existing values are never shown back — leave a field blank to keep it.</p>
+  </header>
+
+  <div id="banner" class="banner">checking…</div>
+
+  <form id="form">
+    <div class="field">
+      <label for="OPENAI_API_KEY">OPENAI_API_KEY</label>
+      <span class="hint">Speech in and out, and the camera's vision. Required unless <code>VOICE_BACKEND</code> is <code>text</code> or <code>none</code>.</span>
+      <input type="password" id="OPENAI_API_KEY" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+      <span class="state" id="state-OPENAI_API_KEY"></span>
+    </div>
+
+    <div class="field">
+      <label for="ANTHROPIC_API_KEY">ANTHROPIC_API_KEY</label>
+      <span class="hint">Needed if the brain's <code>default_model</code> is an Anthropic one.</span>
+      <input type="password" id="ANTHROPIC_API_KEY" autocomplete="off" spellcheck="false" />
+      <span class="state" id="state-ANTHROPIC_API_KEY"></span>
+    </div>
+
+    <div class="field">
+      <label for="GOOGLE_API_KEY">GOOGLE_API_KEY</label>
+      <span class="hint">Needed if the brain's <code>default_model</code> is a Google one.</span>
+      <input type="password" id="GOOGLE_API_KEY" autocomplete="off" spellcheck="false" />
+      <span class="state" id="state-GOOGLE_API_KEY"></span>
+    </div>
+
+    <div class="field">
+      <label for="FAST_BODY_PERSONALITY">FAST_BODY_PERSONALITY</label>
+      <span class="hint">Who the robot is — a built-in card, or one added under Personality cards below. Applies the next time the app starts.</span>
+      <select id="FAST_BODY_PERSONALITY" disabled></select>
+      <span class="state" id="state-FAST_BODY_PERSONALITY"></span>
+    </div>
+
+    <div class="field">
+      <label for="FACE_TRACKING">FACE_TRACKING</label>
+      <span class="hint">Follow the person's face from startup. Off by default — it shares the camera with <code>camera()</code> and moves the head while a still is taken. The robot can still turn it on mid-conversation. Applies the next time the app starts.</span>
+      <select id="FACE_TRACKING" disabled></select>
+      <span class="state" id="state-FACE_TRACKING"></span>
+    </div>
+
+    <div class="field">
+      <label for="OPENAI_TTS_VOICE">OPENAI_TTS_VOICE</label>
+      <span class="hint">How the robot sounds. <code>auto</code> follows the personality card's voice. Applies the next time the app starts.</span>
+      <select id="OPENAI_TTS_VOICE" disabled></select>
+      <span class="state" id="state-OPENAI_TTS_VOICE"></span>
+    </div>
+
+    <div class="field">
+      <label for="ENABLE_MEMORY">ENABLE_MEMORY</label>
+      <span class="hint">Whether the robot keeps what was said after it is switched off. Off stops it saving and resuming; what it already wrote down stays below until you delete it. Applies the next time the app starts.</span>
+      <select id="ENABLE_MEMORY" disabled></select>
+      <span class="state" id="state-ENABLE_MEMORY"></span>
+    </div>
+
+    <button id="save" type="submit">Save</button>
+  </form>
+
+  <h2>Personality cards</h2>
+  <p class="hint">Cards the robot holds besides the built-in ones. They live on the robot and survive an app update. A card is a fast-agent AgentCard: YAML frontmatter, then who the robot is.</p>
+  <p id="cards-where" class="hint"></p>
+  <div id="cards-list">reading…</div>
+
+  <form id="card-upload-form">
+    <div class="field">
+      <label for="card-file">Upload a card</label>
+      <span class="hint">A <code>.md</code> (or <code>.yaml</code>) card file. Its file name becomes the personality's name; the same name as a built-in replaces it.</span>
+      <input type="file" id="card-file" accept=".md,.markdown,.yaml,.yml" />
+    </div>
+    <button id="card-upload" type="submit">Upload card</button>
+  </form>
+
+  <form id="pack-form">
+    <div class="field">
+      <label for="pack-repo">Install a pack from Hugging Face</label>
+      <span class="hint">A repository of cards, written <code>owner/name</code>. Downloaded with the robot's own Hugging Face login, so a private repo works if that account can read it. Install again to update.</span>
+      <input type="text" id="pack-repo" autocomplete="off" spellcheck="false" placeholder="owner/my-cards" />
+    </div>
+    <div class="field">
+      <span class="state" id="cards-note"></span>
+    </div>
+    <button id="pack-install" type="submit">Install pack</button>
+  </form>
+
+  <h2>MCP servers</h2>
+  <p class="hint">Tools the brain can call, beyond the built-in robot ones. Changes are saved on the robot and survive an app update.</p>
+  <p id="mcp-live" class="hint"></p>
+  <div id="mcp-list">reading…</div>
+
+  <form id="mcp-form">
+    <div class="field">
+      <button type="button" id="mcp-preset-ha">Home Assistant preset</button>
+      <span class="hint">Fills the form for Home Assistant's <strong>Model Context Protocol Server</strong> integration (add it in HA first, and pick the Assist API). The URL is HA's address plus <code>/api/mcp</code>; use the IP, since mDNS names are unreliable here. The bearer token is a long-lived access token from the bottom of your HA profile page.</span>
+    </div>
+    <div class="field">
+      <label for="mcp-name">Name</label>
+      <span class="hint">How the brain refers to it. Letters, digits, <code>-</code> <code>_</code> <code>.</code></span>
+      <input type="text" id="mcp-name" autocomplete="off" spellcheck="false" placeholder="fetch" />
+    </div>
+    <div class="field">
+      <label for="mcp-transport">Transport</label>
+      <span class="hint">A remote server is reached by URL; a local one is a command the robot runs. They are not interchangeable.</span>
+      <select id="mcp-transport">
+        <option value="http">http — a URL to connect to</option>
+        <option value="stdio">stdio — a command to run</option>
+      </select>
+    </div>
+    <div class="field mcp-http">
+      <label for="mcp-url">URL</label>
+      <input type="text" id="mcp-url" autocomplete="off" spellcheck="false" placeholder="https://example.com/mcp" />
+    </div>
+    <div class="field mcp-http">
+      <label for="mcp-bearer">Bearer token</label>
+      <span class="hint">Optional. Sent as <code>Authorization: Bearer …</code>. Never shown back — leave blank to keep the current one. A server that needs a browser OAuth flow won't work from a headless robot.</span>
+      <input type="password" id="mcp-bearer" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="field mcp-stdio" hidden>
+      <label for="mcp-command">Command</label>
+      <span class="hint">Must exist on the <em>robot</em>, not your laptop — check with <code>ssh</code> before relying on <code>uvx</code> or <code>npx</code> being there.</span>
+      <input type="text" id="mcp-command" autocomplete="off" spellcheck="false" placeholder="uvx" />
+    </div>
+    <div class="field mcp-stdio" hidden>
+      <label for="mcp-args">Arguments</label>
+      <span class="hint">Space-separated; quote an argument that contains spaces.</span>
+      <input type="text" id="mcp-args" autocomplete="off" spellcheck="false" placeholder="mcp-server-fetch" />
+    </div>
+    <div class="field">
+      <span class="state" id="mcp-note"></span>
+    </div>
+    <button id="mcp-save" type="submit">Add server</button>
+  </form>
+
+  <h2>What the robot remembers</h2>
+  <p id="memory-where" class="hint"></p>
+  <div id="memory-list">reading…</div>
+  <button id="forget-all" type="button">Forget everything</button>
+  <p id="memory-note" class="state"></p>
+
+  <p>This page is served over plain HTTP on your network. Anyone who can reach it can set these (values are never shown back). Set <code>WEB_CHAT_TOKEN</code> to require a token.</p>
+  <p><a id="chat-link" href="#">← back to the chat</a></p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var NAMES = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
+  var token = new URLSearchParams(location.search).get("token") || "";
+  var q = "?token=" + encodeURIComponent(token);
+  var banner = document.getElementById("banner");
+  var save = document.getElementById("save");
+  var SELECTS = {
+    FAST_BODY_PERSONALITY: { el: document.getElementById("FAST_BODY_PERSONALITY"), loaded: false },
+    OPENAI_TTS_VOICE: { el: document.getElementById("OPENAI_TTS_VOICE"), loaded: false },
+    FACE_TRACKING: { el: document.getElementById("FACE_TRACKING"), loaded: false },
+    ENABLE_MEMORY: { el: document.getElementById("ENABLE_MEMORY"), loaded: false },
+  };
+
+  document.getElementById("chat-link").href = "/" + q;
+
+  // Populate once — repopulating on every refresh would stomp a selection the
+  // user is in the middle of making.
+  function populate(id, options, current) {
+    var s = SELECTS[id];
+    if (s.loaded) return;
+    options.forEach(function (name) {
+      var o = document.createElement("option");
+      o.value = name;
+      o.textContent = name;
+      s.el.appendChild(o);
+    });
+    s.el.value = current;
+    s.el.disabled = false;
+    s.loaded = true;
+  }
+
+  // A card uploaded or installed below has to show up in the dropdown without
+  // a reload; rebuild the options only when the set changed, keeping the choice.
+  function refillPersonality(available) {
+    var s = SELECTS.FAST_BODY_PERSONALITY;
+    if (!s.loaded) return;
+    var have = Array.prototype.map.call(s.el.options, function (o) { return o.value; });
+    if (have.join("|") === available.join("|")) return;
+    var chosen = s.el.value;
+    s.el.textContent = "";
+    available.forEach(function (name) {
+      var o = document.createElement("option");
+      o.value = name;
+      o.textContent = name;
+      s.el.appendChild(o);
+    });
+    s.el.value = available.indexOf(chosen) >= 0 ? chosen : available[0];
+  }
+
+  function setState(id, text) {
+    var el = document.getElementById("state-" + id);
+    el.textContent = text;
+    el.className = "state set";
+  }
+
+  function renderPersonality(p) {
+    if (!p || !p.available) return;
+    populate("FAST_BODY_PERSONALITY", p.available, p.current || "default");
+    refillPersonality(p.available);
+    // "selected", not "active": a running brain keeps its persona until restart.
+    setState("FAST_BODY_PERSONALITY", "selected: " + (p.current || "default"));
+  }
+
+  function renderVoice(v) {
+    if (!v || !v.available) return;
+    populate("OPENAI_TTS_VOICE", ["auto"].concat(v.available), v.override ? v.current : "auto");
+    setState("OPENAI_TTS_VOICE", "speaking: " + v.current + (v.override ? "" : " (from personality)"));
+  }
+
+  function renderToggle(id, f, fallback) {
+    if (!f || !f.available) return;
+    populate(id, f.available, f.current || fallback);
+    setState(id, "selected: " + (f.current || fallback));
+  }
+
+  function render(data) {
+    renderPersonality(data.personality);
+    renderVoice(data.voice);
+    renderToggle("FACE_TRACKING", data.face_tracking, "off");
+    renderToggle("ENABLE_MEMORY", data.memory, "on");
+    NAMES.forEach(function (name) {
+      var el = document.getElementById("state-" + name);
+      var isSet = data.keys && data.keys[name];
+      el.textContent = isSet ? "set" : "not set";
+      el.className = "state" + (isSet ? " set" : "");
+    });
+    var errors = data.errors || [];
+    if (errors.length) {
+      banner.className = "banner warn";
+      banner.textContent = "Not started yet: " + errors.join(" · ");
+    } else if (data.ready) {
+      banner.className = "banner ok";
+      banner.textContent = "Running.";
+    } else {
+      banner.className = "banner ok";
+      banner.textContent = "Configured. Starting up…";
+    }
+  }
+
+  function refresh() {
+    fetch("/status" + q)
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () {
+        banner.className = "banner warn";
+        banner.textContent = "Can't reach the app.";
+      });
+  }
+
+  document.getElementById("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var body = {};
+    NAMES.forEach(function (name) {
+      var v = document.getElementById(name).value.trim();
+      if (v) body[name] = v;
+    });
+    Object.keys(SELECTS).forEach(function (id) {
+      var s = SELECTS[id];
+      if (s.loaded && s.el.value) body[id] = s.el.value;
+    });
+    if (!Object.keys(body).length) { refresh(); return; }
+
+    save.disabled = true;
+    fetch("/settings" + q, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        NAMES.forEach(function (n) { document.getElementById(n).value = ""; });
+        render(data);
+      })
+      .catch(function () {
+        banner.className = "banner warn";
+        banner.textContent = "Save failed.";
+      })
+      .finally(function () { save.disabled = false; });
+  });
+
+  function postJson(path, body) {
+    return fetch(path + q, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok) throw new Error(data.error || "request failed");
+        return data;
+      });
+    });
+  }
+
+  // ── personality cards ─────────────────────────────────────────────────
+  var cardsList = document.getElementById("cards-list");
+  var cardsWhere = document.getElementById("cards-where");
+  var cardsNote = document.getElementById("cards-note");
+  var cardFile = document.getElementById("card-file");
+  var cardUpload = document.getElementById("card-upload");
+  var packRepo = document.getElementById("pack-repo");
+  var packInstall = document.getElementById("pack-install");
+
+  function cardRow(text, buttons) {
+    var row = document.createElement("div");
+    row.className = "field";
+    var label = document.createElement("span");
+    label.textContent = text;
+    row.appendChild(label);
+    var actions = document.createElement("span");
+    buttons.forEach(function (pair) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = pair[0];
+      b.style.marginRight = "8px";
+      b.addEventListener("click", pair[1]);
+      actions.appendChild(b);
+    });
+    row.appendChild(actions);
+    return row;
+  }
+
+  function renderCards(data) {
+    if (data.directory) cardsWhere.textContent = "Stored in " + data.directory + ".";
+    if (data.note) cardsNote.textContent = data.note;
+    if (data.available) refillPersonality(data.available);
+    cardsList.textContent = "";
+    var cards = data.cards || [];
+    var packs = data.packs || [];
+    if (!cards.length && !packs.length) {
+      cardsList.textContent = "Only the built-in cards.";
+      return;
+    }
+    cards.forEach(function (c) {
+      cardsList.appendChild(cardRow(
+        c.name + " — uploaded" + (c.shadows_builtin ? ", replaces the built-in" : ""),
+        [["Remove", function () { cardsAction(postJson("/personalities/delete", { name: c.name })); }]]
+      ));
+    });
+    packs.forEach(function (p) {
+      cardsList.appendChild(cardRow(
+        p.repo_id + " (" + p.repo_type + " " + (p.revision || "?") + ") — " + (p.cards.length ? p.cards.join(", ") : "no cards"),
+        [
+          ["Update", function () { cardsAction(postJson("/personalities/packs/install", { repo_id: p.repo_id, repo_type: p.repo_type })); }],
+          ["Remove", function () { cardsAction(postJson("/personalities/packs/remove", { repo_id: p.repo_id })); }],
+        ]
+      ));
+    });
+  }
+
+  function cardsAction(promise) {
+    cardsNote.textContent = "working…";
+    return promise
+      .then(renderCards)
+      .catch(function (e) { cardsNote.textContent = e.message; });
+  }
+
+  function refreshCards() {
+    fetch("/personalities" + q)
+      .then(function (r) { return r.json(); })
+      .then(renderCards)
+      .catch(function () { cardsList.textContent = "Can't reach the app."; });
+  }
+
+  document.getElementById("card-upload-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var file = cardFile.files && cardFile.files[0];
+    if (!file) { cardsNote.textContent = "Choose a card file first."; return; }
+    cardUpload.disabled = true;
+    file.text()
+      .then(function (content) {
+        return cardsAction(postJson("/personalities/upload", { filename: file.name, content: content }));
+      })
+      .then(function () { cardFile.value = ""; })
+      .finally(function () { cardUpload.disabled = false; });
+  });
+
+  document.getElementById("pack-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var repo = packRepo.value.trim();
+    if (!repo) { cardsNote.textContent = "Enter a repo as owner/name."; return; }
+    packInstall.disabled = true;
+    cardsNote.textContent = "downloading…";
+    cardsAction(postJson("/personalities/packs/install", { repo_id: repo })
+      .then(function (data) { packRepo.value = ""; return data; }))
+      .finally(function () { packInstall.disabled = false; });
+  });
+
+  // ── MCP servers ───────────────────────────────────────────────────────
+  var mcpList = document.getElementById("mcp-list");
+  var mcpLive = document.getElementById("mcp-live");
+  var mcpNote = document.getElementById("mcp-note");
+  var mcpSave = document.getElementById("mcp-save");
+  var mcpTransport = document.getElementById("mcp-transport");
+
+  function mcpFields() {
+    return {
+      name: document.getElementById("mcp-name"),
+      url: document.getElementById("mcp-url"),
+      bearer: document.getElementById("mcp-bearer"),
+      command: document.getElementById("mcp-command"),
+      args: document.getElementById("mcp-args"),
+    };
+  }
+
+  function showTransport() {
+    var stdio = mcpTransport.value === "stdio";
+    document.querySelectorAll(".mcp-http").forEach(function (el) { el.hidden = stdio; });
+    document.querySelectorAll(".mcp-stdio").forEach(function (el) { el.hidden = !stdio; });
+  }
+  mcpTransport.addEventListener("change", showTransport);
+
+  function fillForm(s) {
+    var f = mcpFields();
+    f.name.value = s.name;
+    mcpTransport.value = s.transport;
+    f.url.value = s.url;
+    f.bearer.value = "";
+    f.bearer.placeholder = s.has_bearer ? "unchanged" : "";
+    f.command.value = s.command;
+    f.args.value = s.args;
+    showTransport();
+    mcpSave.textContent = "Save " + s.name;
+    f.name.focus();
+  }
+
+  document.getElementById("mcp-preset-ha").addEventListener("click", function () {
+    var f = mcpFields();
+    f.name.value = "home-assistant";
+    mcpTransport.value = "http";
+    f.url.value = "";
+    f.url.placeholder = "http://homeassistant.local:8123/api/mcp";
+    f.bearer.value = "";
+    f.bearer.placeholder = "long-lived access token";
+    f.command.value = f.args.value = "";
+    showTransport();
+    mcpSave.textContent = "Add home-assistant";
+    f.url.focus();
+  });
+
+  function clearForm() {
+    var f = mcpFields();
+    f.name.value = f.url.value = f.bearer.value = f.command.value = f.args.value = "";
+    f.bearer.placeholder = "";
+    f.url.placeholder = "https://example.com/mcp";
+    mcpSave.textContent = "Add server";
+  }
+
+  function renderMcp(data) {
+    mcpLive.textContent = data.live
+      ? "Changes connect and disconnect the running brain immediately."
+      : "The brain isn't running yet — changes apply when it starts.";
+    if (data.note) mcpNote.textContent = data.note;
+    mcpList.textContent = "";
+    var servers = data.servers || [];
+    if (!servers.length) {
+      mcpList.textContent = "No servers added.";
+    }
+    servers.forEach(function (s) {
+      var row = document.createElement("div");
+      row.className = "field";
+      var label = document.createElement("span");
+      var target = s.transport === "stdio" ? (s.command + " " + s.args).trim() : s.url;
+      var state = !s.enabled ? "disabled"
+        : s.attached === true ? "attached"
+        : s.attached === false ? "enabled, not attached"
+        : "enabled";
+      label.textContent = s.name + " (" + s.transport + ") — " + target + " — " + state;
+      row.appendChild(label);
+      if (s.error) {
+        var err = document.createElement("span");
+        err.className = "state";
+        err.textContent = "last error: " + s.error;
+        row.appendChild(err);
+      }
+      var actions = document.createElement("span");
+      [
+        [s.enabled ? "Disable" : "Enable", function () {
+          mcpAction(postJson("/mcp/toggle", { name: s.name, enabled: !s.enabled }));
+        }],
+        ["Edit", function () { fillForm(s); }],
+        ["Remove", function () {
+          mcpAction(postJson("/mcp/delete", { name: s.name }));
+        }],
+      ].forEach(function (pair) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = pair[0];
+        b.style.marginRight = "8px";
+        b.addEventListener("click", pair[1]);
+        actions.appendChild(b);
+      });
+      row.appendChild(actions);
+      mcpList.appendChild(row);
+    });
+  }
+
+  function mcpAction(promise) {
+    mcpNote.textContent = "working…";
+    return promise
+      .then(renderMcp)
+      .catch(function (e) { mcpNote.textContent = e.message; });
+  }
+
+  function refreshMcp() {
+    fetch("/mcp" + q)
+      .then(function (r) { return r.json(); })
+      .then(renderMcp)
+      .catch(function () { mcpList.textContent = "Can't reach the app."; });
+  }
+
+  document.getElementById("mcp-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = mcpFields();
+    mcpSave.disabled = true;
+    mcpAction(postJson("/mcp/save", {
+      name: f.name.value.trim(),
+      transport: mcpTransport.value,
+      url: f.url.value.trim(),
+      bearer_token: f.bearer.value,
+      command: f.command.value.trim(),
+      args: f.args.value.trim(),
+    }).then(function (data) { clearForm(); return data; }))
+      .finally(function () { mcpSave.disabled = false; });
+  });
+
+  // ── saved conversations ───────────────────────────────────────────────
+  var memoryList = document.getElementById("memory-list");
+  var memoryWhere = document.getElementById("memory-where");
+  var memoryNote = document.getElementById("memory-note");
+
+  function forget(body) {
+    memoryNote.textContent = "";
+    return fetch("/memory/forget" + q, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) {
+          memoryNote.textContent = "Delete failed: " + data.error;
+        } else {
+          var n = data.removed || 0;
+          memoryNote.textContent =
+            (n ? "Forgot " + n + (n === 1 ? " conversation." : " conversations.") : "Nothing to forget.") +
+            (data.cleared ? " The conversation in progress was cleared too." : "");
+        }
+        renderSessions(data);
+      })
+      .catch(function () { memoryNote.textContent = "Delete failed."; });
+  }
+
+  function renderSessions(data) {
+    if (data.directory) {
+      memoryWhere.textContent =
+        "Stored in " + data.directory +
+        (data.enabled ? ", resuming a conversation up to " + data.resume_hours + "h old."
+                      : ". Saving is off; these are what was kept earlier.");
+    }
+    var sessions = data.sessions || [];
+    memoryList.textContent = "";
+    if (!sessions.length) {
+      memoryList.textContent = "Nothing saved.";
+      return;
+    }
+    sessions.forEach(function (s) {
+      var row = document.createElement("div");
+      row.className = "field";
+      var label = document.createElement("span");
+      label.textContent = (s.title || s.name) + " — last spoken to " + s.age_hours + "h ago";
+      var del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "Forget";
+      del.addEventListener("click", function () { forget({ name: s.name }); });
+      row.appendChild(label);
+      row.appendChild(del);
+      memoryList.appendChild(row);
+    });
+  }
+
+  function refreshMemory() {
+    fetch("/memory" + q)
+      .then(function (r) { return r.json(); })
+      .then(renderSessions)
+      .catch(function () { memoryList.textContent = "Can't reach the app."; });
+  }
+
+  document.getElementById("forget-all").addEventListener("click", function () {
+    forget({ all: true });
+  });
+
+  refresh();
+  refreshCards();
+  refreshMcp();
+  refreshMemory();
+  setInterval(refresh, 5000);
+  setInterval(refreshMcp, 15000);
+})();
+</script>
+</body>
+</html>

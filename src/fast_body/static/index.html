@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>fast-body</title>
+<style>
+  :root {
+    --ground: #e7ecee;
+    --surface: #fbfcfc;
+    --ink: #14232a;
+    --muted: #5a7079;
+    --user: #0b6e64;
+    --warn: #a65516;
+    --rule: rgba(20, 35, 42, 0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0e181d;
+      --surface: #172630;
+      --ink: #d9e4e7;
+      --muted: #8aa1a9;
+      --user: #4fc3b0;
+      --warn: #e39b4a;
+      --rule: rgba(217, 228, 231, 0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h1 {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  #status {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  header a {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--user);
+  }
+  #setup {
+    margin: 0 18px;
+    padding: 12px 14px;
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--warn);
+    border-radius: 4px;
+    background: var(--surface);
+    font-size: 14px;
+  }
+  #setup a { color: var(--user); }
+  #status.live::before {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--user);
+    margin-right: 6px;
+  }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .line { max-width: 68ch; }
+  .who {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .what {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 9px 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .line.user .who { color: var(--user); }
+  /* A widget: the page an MCP server pairs with a tool result, in its own
+     sandbox. It sizes itself; until it does, a short strip. */
+  .line.app { max-width: min(100%, 760px); }
+  .line.app iframe {
+    display: block;
+    width: 100%;
+    height: 96px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+  }
+  .line.app .what { color: var(--muted); }
+  /* What the robot is doing while a reply is on its way. */
+  #activity {
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 6px 0 0;
+  }
+  #activity::before { content: "\25CF  "; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.15; } }
+  /* A question a server asked: the options as buttons. */
+  .line.choice .what { display: flex; flex-direction: column; gap: 8px; }
+  .line.choice .prompt { white-space: pre-wrap; }
+  .line.choice .options { display: flex; flex-direction: column; gap: 6px; }
+  .line.choice button.option {
+    text-align: left;
+    line-height: 1.4;
+    border-left: 3px solid var(--user);
+  }
+  .line.choice button.option small { display: block; color: var(--muted); }
+  .line.choice button.option.picked { background: var(--user); color: var(--ground); border-color: var(--user); }
+  .line.choice .settled { font-size: 12px; color: var(--muted); }
+  footer {
+    border-top: 1px solid var(--rule);
+    padding: 12px 18px;
+    display: flex;
+    gap: 10px;
+  }
+  input, button {
+    font: inherit;
+    border-radius: 4px;
+    border: 1px solid var(--rule);
+    padding: 9px 12px;
+    background: var(--surface);
+    color: var(--ink);
+  }
+  input { flex: 1; }
+  input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--user);
+    outline-offset: 1px;
+  }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>fast-body</h1>
+    <span id="status">connecting…</span>
+    <a id="settings-link" href="#">settings</a>
+  </header>
+
+  <div id="setup" hidden></div>
+
+  <div id="log" role="log" aria-live="polite" aria-label="Conversation"></div>
+  <div id="activity" hidden></div>
+
+  <footer>
+    <input id="msg" placeholder="Say something to the robot…" autocomplete="off"
+           maxlength="2000" aria-label="Message" disabled />
+    <button id="send" disabled>Send</button>
+    <button id="stop" title="Stop the robot mid-reply" disabled>Stop</button>
+  </footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var log = document.getElementById("log");
+  var status = document.getElementById("status");
+  var msg = document.getElementById("msg");
+  var send = document.getElementById("send");
+  var stop = document.getElementById("stop");
+
+  var token = new URLSearchParams(location.search).get("token") || "";
+  var q = "?token=" + encodeURIComponent(token);
+  var socket = null;
+  var retry = 1000;
+
+  var setup = document.getElementById("setup");
+  var settingsHref = "/settings" + q;
+  document.getElementById("settings-link").href = settingsHref;
+
+  // The app serves this page before it can talk, so say which it is rather than
+  // leaving a chat window that silently never answers. While it is still
+  // starting, anything typed is held and sent once the conversation is up.
+  function checkSetup() {
+    fetch("/status" + q)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var errors = (data && data.errors) || [];
+        setup.replaceChildren();
+        if (errors.length) {
+          var p = document.createElement("div");
+          p.textContent = "Not talking yet: " + errors.join(" · ");
+          var a = document.createElement("a");
+          a.href = settingsHref;
+          a.textContent = "Open settings to add a key →";
+          setup.appendChild(p);
+          setup.appendChild(a);
+          setup.hidden = false;
+          return;
+        }
+        if (data && data.ready === false) {
+          var s = document.createElement("div");
+          s.textContent = "Starting up — anything you type is sent once the robot is listening.";
+          setup.appendChild(s);
+          setup.hidden = false;
+          setTimeout(checkSetup, 2000);
+          return;
+        }
+        setup.hidden = true;
+      })
+      .catch(function () { /* the socket status already covers being offline */ });
+  }
+
+  // Every value here is set with textContent. Replies come from a language model
+  // and may contain anything; none of it is ever parsed as markup.
+  function addLine(role, text) {
+    var line = document.createElement("div");
+    line.className = "line " + (role === "user" ? "user" : "robot");
+
+    var who = document.createElement("div");
+    who.className = "who";
+    who.textContent = role === "user" ? "you" : "reachy";
+
+    var what = document.createElement("div");
+    what.className = "what";
+    what.textContent = text;
+
+    line.appendChild(who);
+    line.appendChild(what);
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ── What the robot is doing while a reply is on its way ─────────────────
+  //
+  // Activity, not content: that it is thinking, for how long, and — when the
+  // card allows the tool to be named — which kind of step it is on. Tool
+  // arguments and results never come this way (see web/apps.py).
+  var activityEl = document.getElementById("activity");
+  var activity = { since: 0, steps: 0, step: "", timer: null };
+
+  function renderActivity() {
+    var seconds = Math.round((Date.now() - activity.since) / 1000);
+    var text = "thinking · " + seconds + " s";
+    if (activity.steps) text += " · " + (activity.step || "step " + activity.steps);
+    activityEl.textContent = text;
+  }
+
+  function showActivity(entry) {
+    if (entry.state !== "thinking") { clearActivity(); return; }
+    if (activity.timer === null) {
+      activity.since = Date.now();
+      activity.steps = 0;
+      activity.step = "";
+      activity.timer = setInterval(renderActivity, 1000);
+      activityEl.hidden = false;
+    }
+    if (typeof entry.step === "string") {
+      activity.steps += 1;
+      activity.step = entry.step;
+    }
+    renderActivity();
+  }
+
+  function clearActivity() {
+    if (activity.timer !== null) clearInterval(activity.timer);
+    activity.timer = null;
+    activityEl.hidden = true;
+    activityEl.textContent = "";
+  }
+
+  // One transcript entry, whatever it is.
+  function show(entry) {
+    if (entry.role === "activity") { showActivity(entry); return; }
+    if (entry.role === "app") { addWidget(entry); return; }
+    if (entry.role === "app-result") { finishWidget(entry); return; }
+    if (entry.role === "choice") { addChoice(entry); return; }
+    if (entry.role === "choice-answered") { settleChoice(entry); return; }
+    addLine(entry.role, entry.text);
+  }
+
+  // ── A question from a server (MCP elicitation), answered on the page ──
+  //
+  // The robot reads the options aloud and listens; the page offers the same
+  // options as buttons. First answer wins, on any screen or by voice, and
+  // every page then shows what was picked.
+  var choicesOnPage = {};  // choice id → {line, buttons, settled}
+
+  function addChoice(entry) {
+    var line = document.createElement("div");
+    line.className = "line choice";
+
+    var who = document.createElement("div");
+    who.className = "who";
+    who.textContent = "your call";
+
+    var what = document.createElement("div");
+    what.className = "what";
+
+    var prompt = document.createElement("div");
+    prompt.className = "prompt";
+    prompt.textContent = entry.prompt || "";
+    what.appendChild(prompt);
+
+    var options = document.createElement("div");
+    options.className = "options";
+    var buttons = {};
+    (entry.options || []).forEach(function (option, i) {
+      var b = document.createElement("button");
+      b.className = "option";
+      b.type = "button";
+      b.textContent = (i + 1) + ". " + option.label;
+      if (option.description) {
+        var d = document.createElement("small");
+        d.textContent = option.description;
+        b.appendChild(d);
+      }
+      b.addEventListener("click", function () { answerChoice(entry.id, option.id); });
+      buttons[option.id] = b;
+      options.appendChild(b);
+    });
+    what.appendChild(options);
+
+    var settled = document.createElement("div");
+    settled.className = "settled";
+    what.appendChild(settled);
+
+    line.appendChild(who);
+    line.appendChild(what);
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+
+    choicesOnPage[entry.id] = { line: line, buttons: buttons, settled: settled };
+    if (entry.answered || entry.how) settleChoice(entry);
+  }
+
+  function settleChoice(entry) {
+    var state = choicesOnPage[entry.id];
+    if (!state) return;
+    Object.keys(state.buttons).forEach(function (id) {
+      state.buttons[id].disabled = true;
+      if (id === entry.answered) state.buttons[id].classList.add("picked");
+    });
+    var how = entry.how;
+    state.settled.textContent = entry.answered
+      ? (how === "spoken" ? "answered out loud" : how === "page" ? "picked on the page" : "answered")
+      : (how === "timeout" ? "nobody answered" : "answered in other words");
+  }
+
+  function answerChoice(choiceId, optionId) {
+    var state = choicesOnPage[choiceId];
+    if (state) Object.keys(state.buttons).forEach(function (id) { state.buttons[id].disabled = true; });
+    fetch("/apps/choice" + q, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: choiceId, option: optionId })
+    })
+      .then(function (r) {
+        if (!r.ok && state) {
+          // Someone else got there first, or it timed out; the settle
+          // message for that arrives over the socket.
+          Object.keys(state.buttons).forEach(function (id) { state.buttons[id].disabled = true; });
+        }
+      })
+      .catch(function () {
+        if (state) Object.keys(state.buttons).forEach(function (id) { state.buttons[id].disabled = false; });
+      });
+  }
+
+  // ── MCP Apps: a tool result the server pairs with a page of its own ──────
+  //
+  // The widget is an HTML bundle the server serves as a `ui://` resource. It
+  // runs in a sandboxed iframe (opaque origin: no cookies, no storage, no
+  // access to this page) and talks JSON-RPC over postMessage — this is the
+  // host half of that bridge. The robot side posts an "app" entry when the
+  // tool is called, with its arguments, and an "app-result" when it returns,
+  // so a widget can animate while the server works.
+  var PROTOCOL_VERSION = "2026-01-26";
+  var MAX_WIDGET_WIDTH = 760;
+  var widgets = {};      // call id → {entry, frame, ready, queue}
+  var resources = {};    // "server uri" → Promise of {html, mimeType}
+
+  function fetchWidget(server, uri) {
+    var key = server + " " + uri;
+    if (!resources[key]) {
+      resources[key] = fetch("/apps/resource" + q + "&server=" + encodeURIComponent(server) +
+                             "&uri=" + encodeURIComponent(uri))
+        .then(function (r) {
+          if (!r.ok) throw new Error("widget unavailable (" + r.status + ")");
+          return r.json();
+        });
+      resources[key].catch(function () { delete resources[key]; });
+    }
+    return resources[key];
+  }
+
+  function theme() {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function hostContext() {
+    return {
+      theme: theme(),
+      displayMode: "inline",
+      availableDisplayModes: ["inline"],
+      containerDimensions: { maxWidth: Math.min(MAX_WIDGET_WIDTH, Math.max(240, log.clientWidth - 36)) },
+      locale: navigator.language,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      userAgent: navigator.userAgent,
+      platform: window.matchMedia("(pointer: coarse)").matches ? "mobile" : "web",
+      deviceCapabilities: {
+        touch: navigator.maxTouchPoints > 0,
+        hover: window.matchMedia("(hover: hover)").matches
+      }
+    };
+  }
+
+  function post(state, message) {
+    if (state.frame.contentWindow) state.frame.contentWindow.postMessage(message, "*");
+  }
+
+  // Notifications wait until the widget has said it is ready.
+  function notify(state, method, params) {
+    var message = { jsonrpc: "2.0", method: method, params: params };
+    if (state.ready) post(state, message); else state.queue.push(message);
+  }
+
+  function reply(state, id, result) {
+    post(state, { jsonrpc: "2.0", id: id, result: result });
+  }
+
+  function refuse(state, id, code, text) {
+    post(state, { jsonrpc: "2.0", id: id, error: { code: code, message: text } });
+  }
+
+  function addWidget(entry) {
+    var line = document.createElement("div");
+    line.className = "line app";
+
+    var who = document.createElement("div");
+    who.className = "who";
+    who.textContent = entry.tool.replace(/_/g, " ");
+
+    var frame = document.createElement("iframe");
+    // allow-scripts without allow-same-origin: the bundle runs, but as an
+    // opaque origin it cannot reach this page, its storage, or its routes.
+    frame.setAttribute("sandbox", "allow-scripts allow-forms");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.title = entry.tool;
+
+    line.appendChild(who);
+    line.appendChild(frame);
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+
+    var state = { entry: entry, frame: frame, line: line, ready: false, queue: [], closed: false };
+    widgets[entry.id] = state;
+    notify(state, "ui/notifications/tool-input", { arguments: entry.arguments || {} });
+    if (entry.result) notify(state, "ui/notifications/tool-result", entry.result);
+    else if (entry.cancelled) notify(state, "ui/notifications/tool-cancelled", {});
+    else if (entry.failed) closeWidget(state);
+
+    fetchWidget(entry.server, entry.uri)
+      .then(function (res) { if (!state.closed) frame.srcdoc = res.html; })
+      .catch(function (e) {
+        // The result still reached the robot; only the picture is missing.
+        if (state.closed) return;
+        var what = document.createElement("div");
+        what.className = "what";
+        what.textContent = String(e.message || e);
+        line.replaceChild(what, frame);
+      });
+  }
+
+  // The call came back an error. The robot reads it and usually calls again,
+  // and that call draws its own widget, so this one folds to a line rather
+  // than showing a broken result beside the good one.
+  function closeWidget(state) {
+    if (state.closed) return;
+    state.closed = true;
+    var what = document.createElement("div");
+    what.className = "what";
+    what.textContent = "didn't go through";
+    if (state.frame.parentNode === state.line) state.line.replaceChild(what, state.frame);
+  }
+
+  function finishWidget(entry) {
+    var state = widgets[entry.id];
+    if (!state) return;  // the call started before this page opened
+    state.entry.result = entry.result;
+    state.entry.cancelled = entry.cancelled;
+    state.entry.failed = entry.failed;
+    if (entry.result) notify(state, "ui/notifications/tool-result", entry.result);
+    else if (entry.cancelled) notify(state, "ui/notifications/tool-cancelled", {});
+    else if (entry.failed) closeWidget(state);
+  }
+
+  function widgetFor(source) {
+    for (var id in widgets) {
+      if (widgets[id].frame.contentWindow === source) return widgets[id];
+    }
+    return null;
+  }
+
+  // A widget's own tool call goes to the robot, which runs it on the
+  // widget's server and tells the conversation what came back.
+  function callFromWidget(state, request) {
+    var params = request.params || {};
+    fetch("/apps/call" + q, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server: state.entry.server, name: params.name, arguments: params.arguments || {} })
+    })
+      .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+      .then(function (res) {
+        if (res.ok) reply(state, request.id, res.body);
+        else refuse(state, request.id, -32000, (res.body && res.body.error) || "call failed");
+      })
+      .catch(function (e) { refuse(state, request.id, -32000, String(e)); });
+  }
+
+  window.addEventListener("message", function (event) {
+    var state = widgetFor(event.source);
+    var data = event.data;
+    if (!state || !data || data.jsonrpc !== "2.0") return;
+
+    if (data.method === "ui/initialize") {
+      reply(state, data.id, {
+        protocolVersion: PROTOCOL_VERSION,
+        hostInfo: { name: "fast-body", version: "0.1.0" },
+        hostCapabilities: { serverTools: {}, logging: {} },
+        hostContext: hostContext()
+      });
+    } else if (data.method === "ui/notifications/initialized") {
+      state.ready = true;
+      state.queue.forEach(function (m) { post(state, m); });
+      state.queue = [];
+    } else if (data.method === "ui/notifications/size-changed") {
+      var size = data.params || {};
+      var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      if (size.height) state.frame.style.height = Math.ceil(size.height) + "px";
+      if (size.width) state.frame.style.width = Math.min(MAX_WIDGET_WIDTH, Math.ceil(size.width)) + "px";
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    } else if (data.method === "tools/call") {
+      callFromWidget(state, data);
+    } else if (data.method === "ping") {
+      reply(state, data.id, {});
+    } else if (data.method === "notifications/message") {
+      var p = data.params || {};
+      console.log("[" + state.entry.tool + "]", p.level || "info", p.data);
+    } else if (data.id !== undefined && data.method) {
+      refuse(state, data.id, -32601, "not supported by this host: " + data.method);
+    }
+  });
+
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+    for (var id in widgets) {
+      if (widgets[id].ready) notify(widgets[id], "ui/notifications/host-context-changed", { theme: theme() });
+    }
+  });
+
+  function setLive(live, label) {
+    status.textContent = label;
+    status.className = live ? "live" : "";
+    msg.disabled = !live;
+    send.disabled = !live;
+    stop.disabled = !live;
+  }
+
+  function connect() {
+    var scheme = location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(scheme + "://" + location.host + "/ws?token=" + encodeURIComponent(token));
+
+    socket.onopen = function () {
+      retry = 1000;
+      setLive(true, "connected");
+      msg.focus();
+    };
+
+    socket.onmessage = function (event) {
+      var data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
+      if (data.role === "history") {
+        log.replaceChildren();
+        clearActivity();
+        widgets = {};
+        choicesOnPage = {};
+        (data.lines || []).forEach(show);
+        return;
+      }
+      show(data);
+    };
+
+    socket.onclose = function () {
+      clearActivity();
+      setLive(false, "disconnected — retrying");
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 15000);
+    };
+  }
+
+  function submit() {
+    var text = msg.value.trim();
+    if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ text: text }));
+    msg.value = "";
+  }
+
+  send.addEventListener("click", submit);
+  msg.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") submit();
+  });
+  stop.addEventListener("click", function () {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "interrupt" }));
+    }
+  });
+
+  connect();
+  checkSetup();
+  setInterval(checkSetup, 5000);
+})();
+</script>
+</body>
+</html>

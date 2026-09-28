@@ -1,0 +1,55 @@
+# ── fast-agent brain configuration ─────────────────────────────────────
+# This is the brain that drives the body. Swap providers freely — the robot
+# tools and voice loop don't care which model is reasoning.
+#
+# Model string format: <provider>.<model>  (aliases like `sonnet`, `haiku`,
+# `gpt-5` also work). Examples:
+#   anthropic.claude-opus-4-7
+#   openai.gpt-5
+#   google.gemini-3.1-pro
+#   generic.qwen2.5            (local, via an OpenAI-compatible endpoint)
+#
+# `hf.` runs on Hugging Face Inference Providers, which needs no key of its own:
+# fast-agent falls back to the token `hf auth login` stores, and a robot already
+# has one from installing apps. `:provider` picks who serves it.
+#
+# Replies are spoken, so latency matters more than depth. Pin the reasoning
+# setting on a router model: fast-agent's router profiles default to the
+# highest effort.
+default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low
+
+# fast-body sets compaction.threshold at startup from FAST_BODY_CONTEXT_BUDGET
+# (a token count; see docs/design.md#memory). keep_turns survive verbatim.
+compaction:
+  auto: true
+  keep_turns: 2
+
+# Console rendering for the brain. These are TRUE so the interactive dev console
+# (`fast-body --console`) can show the brain's prompts, tool calls, and results.
+# In every other mode agent.py passes `quiet=True`, which overrides all three back
+# to false at runtime, so the headless path stays silent.
+logger:
+  level: warning
+  progress_display: true
+  show_chat: true
+  show_tools: true
+
+# MCP servers the brain can use. Add servers here, THEN list the ones the
+# body should attach to in FAST_BODY_SERVERS (.env).
+#
+# `${VAR}` is filled in from the environment when fast-agent loads this file,
+# so a secret can stay in the instance .env instead of here — which matters
+# because an app update overwrites this file and leaves the .env alone.
+mcp:
+  servers:
+    # Nothing is defined here. Home Assistant and other per-install
+    # servers are added from the settings page (they go in
+    # ~/.fast-body/mcp_servers.yaml, which an app update leaves alone); the
+    # page has a preset for Home Assistant's MCP Server integration. A
+    # personality card may still name one in its `servers:` list; it attaches
+    # once the brain is up.
+
+    # Example — uncomment and set FAST_BODY_SERVERS=fetch
+    # fetch:
+    #   command: uvx
+    #   args: ["mcp-server-fetch"]

@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fast-body"
+version = "0.2.0"
+description = "An embodied fast-agent: a Reachy Mini robot driven by the fast-agent framework"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ola Hungerford" }]
+keywords = ["reachy-mini", "fast-agent", "mcp", "robot", "voice"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# fast-agent-mcp allows >=3.12,<3.15 and reachy-mini >=3.11. 3.12 is the floor
+# that matters: the robot's shared apps_venv is built from the daemon's own
+# interpreter, which is 3.12 on the current OS image.
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  # 1.9.0 is what the robot runs, and the floor for daemon-side head tracking
+  # (start_head_tracking) and media.get_frame_jpeg() — see embodiment/gaze.py.
+  "reachy-mini>=1.9.0",
+  # Pinned exactly: the daemon installs apps with a plain `uv pip install`,
+  # which takes the newest release a floor allows and never reads uv.lock.
+  # Upgrading is: bump here, `uv lock`, tests, deploy.
+  "fast-agent-mcp==0.10.33",
+  # fast-agent 0.10.x needs a fastmcp-slim 4.0 pre-release. uv only allows a
+  # pre-release when a *direct* dependency asks for one, and the daemon installs
+  # apps with a plain `uv pip install`, which ignores [tool.uv]. Declaring it here
+  # is what makes the app installable on a robot.
+  "fastmcp-slim>=4.0.0b2",
+  "prompt_toolkit",  # interactive dev console input layer (also a fast-agent dep)
+  # Same reason as fast-agent-mcp. The realtime transcription session needs
+  # the GA surface from 2.28.0 on; 3.18.0 is what fast-agent 0.10.33 pins.
+  "openai==3.18.0",
+  "numpy",
+  "scipy",
+  "python-dotenv",
+  # Card packs are downloaded from the Hub with the robot's own login; already a
+  # fast-agent dependency, declared because we import it.
+  "huggingface_hub>=1.0",
+  "webrtcvad-wheels>=2.0.14",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+  "mypy",
+  "types-PyYAML",
+]
+
+[project.urls]
+Homepage = "https://github.com/olaservo/fast-body"
+Issues = "https://github.com/olaservo/fast-body/issues"
+
+[project.scripts]
+fast-body = "fast_body.main:main"
+
+[project.entry-points."reachy_mini_apps"]
+# Must match both the package dir and the HF Space name: the daemon looks for
+# site-packages/<entry-point-name>/main.py to find custom_app_url, and resolves
+# an installed Space by the entry point named like the Space.
+fast_body = "fast_body.app:FastBodyApp"
+
+[tool.uv]
+# reachy-mini pins starlette<1.0.0 only because its *settings web UI* uses the
+# old TemplateResponse signature. fast-body never starts that UI, so
+# fast-agent's starlette==1.6.0 is fine here. Without this override the two
+# trees don't resolve at all.
+override-dependencies = ["starlette==1.6.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# All of these have to reach an installed app: the pages web/server.py serves,
+# the brain's config, and the personality cards. They live in the package so
+# the code finds them next to itself rather than at a repo root that doesn't
+# exist on a robot.
+fast_body = [
+  "static/*.html",
+  "fast-agent.config.yaml",
+  "personalities/*.md",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Tests import each other as `tests.<module>`, so the repo root has to be on sys.path.
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.12"
+# The SDK, scipy and the VAD ship no stubs; everything else is checked.
+[[tool.mypy.overrides]]
+module = ["reachy_mini.*", "scipy.*", "webrtcvad", "frontmatter", "yaml"]
+ignore_missing_imports = true

@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      # reachy-mini depends on pygobject, which builds pycairo from source, and
+      # importing it needs the GStreamer typelibs.
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libcairo2-dev libgirepository1.0-dev pkg-config
+          gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest -q
