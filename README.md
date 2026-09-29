@@ -26,7 +26,7 @@ Why it is built this way, and how it compares to the other Reachy Mini agent app
 
 The conversation loop only ever moves *text* between the voice layer and the brain — that's what keeps both the model provider and the audio stack swappable. The brain decides when to move by calling in-process tools; moves run on their own thread so speech and motion overlap.
 
-Around that loop: antenna cues show whose turn it is, the daemon tracks your face when the brain asks (`look_at_me`), `camera()` and `examine()` let the brain see, a companion browser page carries the transcript and takes typed input, and you can talk over the robot to interrupt it on its built-in speaker. Each of these is described in [docs/design.md](docs/design.md#conversational-polish).
+Around that loop: antenna cues show whose turn it is, the daemon tracks your face when the brain asks (`look_at_me`), `camera()` and `examine()` let the brain see, a companion browser page carries the transcript and takes typed input, and you can talk over the robot to interrupt it on its built-in speaker. Why some of these work the way they do: [docs/design.md](docs/design.md).
 
 ## Install
 
@@ -97,7 +97,7 @@ In Home Assistant, add the **Model Context Protocol Server** integration (Settin
 
 ### Servers that sleep
 
-A free Hugging Face Space sleeps after 48 hours without a request and takes tens of seconds to come back. At startup fast-body first sends one request to every enabled http server at once, which starts a sleeping Space, and waits up to 90 seconds for the slowest before attaching; the boot line then says which server `woke in N s`. A server that still fails to attach is retried in the background at growing intervals (about 20, 40 and 80 seconds later), with the skills sync run again once it makes it, and the log says when it gives up. The settings page can attach it by hand after that. Why it works this way: [docs/design.md](docs/design.md#servers-that-sleep).
+A free Hugging Face Space sleeps after 48 hours without a request and takes tens of seconds to come back. At startup fast-body first sends one request to every enabled http server at once, which starts a sleeping Space, and waits up to 90 seconds for the slowest before attaching; the boot line then says which server `woke in N s`. A server that still fails to attach is retried in the background at growing intervals (about 20, 40 and 80 seconds later), with the skills sync run again once it makes it, and the log says when it gives up. The settings page can attach it by hand after that.
 
 ### Memory
 
@@ -107,7 +107,7 @@ Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours of the last thing y
 
 The store is `~/.fast-body`, not the installed package, so an app update or remove leaves it alone. The same directory holds skills and personality cards. What was written down is listed on the settings page, with a button to forget one conversation or all of them. `ENABLE_MEMORY=false` stops the saving and the resuming, and leaves earlier recordings listed so you can still delete them.
 
-Every turn replays the conversation so far, and `FAST_BODY_CONTEXT_BUDGET` is the absolute token count at which it is compacted. A model fast-agent's `ModelDatabase` doesn't know reports no window at all, and compaction is then skipped entirely — without saying so. The startup `context:` line reports it either way, so check that before assuming a long conversation is being managed. The resume policy, retention, and why the budget is a token count: [docs/design.md](docs/design.md#memory).
+Every turn replays the conversation so far, and `FAST_BODY_CONTEXT_BUDGET` is the absolute token count at which it is compacted. A model fast-agent's `ModelDatabase` doesn't know reports no window at all, and compaction is then skipped entirely — without saying so. The startup `context:` line reports it either way, so check that before assuming a long conversation is being managed. The resume policy and why the budget is a token count: [docs/design.md](docs/design.md#memory).
 
 ### Personalities
 
