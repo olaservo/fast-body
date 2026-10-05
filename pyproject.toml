@@ -26,7 +26,7 @@ dependencies = [
   # Pinned exactly: the daemon installs apps with a plain `uv pip install`,
   # which takes the newest release a floor allows and never reads uv.lock.
   # Upgrading is: bump here, `uv lock`, tests, deploy.
-  "fast-agent-mcp==0.10.33",
+  "fast-agent-mcp==0.10.42",
   # fast-agent 0.10.x needs a fastmcp-slim 4.0 pre-release. uv only allows a
   # pre-release when a *direct* dependency asks for one, and the daemon installs
   # apps with a plain `uv pip install`, which ignores [tool.uv]. Declaring it here
@@ -34,8 +34,8 @@ dependencies = [
   "fastmcp-slim>=4.0.0b2",
   "prompt_toolkit",  # interactive dev console input layer (also a fast-agent dep)
   # Same reason as fast-agent-mcp. The realtime transcription session needs
-  # the GA surface from 2.28.0 on; 3.18.0 is what fast-agent 0.10.33 pins.
-  "openai==3.18.0",
+  # the GA surface from 2.28.0 on; 3.21.0 is what fast-agent 0.10.42 pins.
+  "openai==3.21.0",
   "numpy",
   "scipy",
   "python-dotenv",

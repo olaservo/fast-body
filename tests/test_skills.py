@@ -137,7 +137,7 @@ class FakeServer:
     def _resources(self):
         from fast_agent.mcp.skills_extension import SkillResource
 
-        return [SkillResource(uri=self._uri(rel), digest=_digest(text)) for rel, text in self.files.items()]
+        return [SkillResource(uri=self._uri(rel), digest=_digest(text), size=len(text.encode())) for rel, text in self.files.items()]
 
     def _entry(self):
         import frontmatter
