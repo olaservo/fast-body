@@ -28,9 +28,9 @@ The loop only moves *text* between the voice layer and the brain, so the model p
 
 Around that loop: antenna cues show whose turn it is, a companion browser page shows the transcript and takes typed input, and you can talk over the robot to interrupt it.
 
-Face tracking is the daemon's job. `look_at_me` switches on the daemon's tracker, which blends the aim into whatever pose we command, so eye contact holds through an emotion or a dance and the app spends nothing per frame.
+`look_at_me` switches on the daemon's face tracker, which blends the aim into whatever pose the brain commands, so eye contact holds through an emotion or a dance.
 
-The brain has two ways to see. `camera()` hands the frame to the brain, which describes it in its own voice. `examine(question)` has a separate vision model read the frame and answer in words; the image never enters the conversation, which keeps the history small when the brain only needs a fact, like the number on a die.
+`camera()` hands the frame to the brain. `examine(question)` has a separate vision model answer in words, so the image never enters the conversation.
 
 ## Install
 
@@ -43,6 +43,30 @@ cp .env.example .env
 ```
 
 The voice needs an `OPENAI_API_KEY` in `.env`. The default brain is an `hf.` model, which uses the token from `hf auth login` (a robot already has one from installing apps). Any other brain needs its provider's key, either in `.env` or in `fast-agent.secrets.yaml`.
+
+### Deploy to the robot
+
+The robot's daemon installs apps from Hugging Face Spaces, so a deploy is a Space holding this repo. A private Space works.
+
+1. Create a Space named `fast_body`, the same as the app's entry point, with the `static` SDK, and push this repo to it with this frontmatter at the top of `README.md`:
+
+   ```yaml
+   ---
+   title: fast-body
+   sdk: static
+   tags:
+     - reachy_mini
+     - reachy_mini_python_app
+   ---
+   ```
+
+2. Before pushing, remove `reachy-mini` from `[project.dependencies]`: the daemon pre-installs it, and its `starlette` pin conflicts with fast-agent's. Leave `tests/` and `scripts/` out as well, or the Space's secret scanner may refuse the push.
+
+3. Install it from the Reachy Mini app, which lists private Spaces too once the robot is logged in to Hugging Face.
+
+4. Set `OPENAI_API_KEY` and any brain key on the settings page. They are kept across app updates.
+
+Later versions go out with `POST /api/apps/update/fast_body`, or the dashboard's update button.
 
 ## Configure
 
@@ -74,19 +98,13 @@ default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low   # any fast-agent
 
 Add servers from the settings page, which has a preset for Home Assistant's Model Context Protocol Server integration. Servers added there survive app updates.
 
-### Servers that sleep
-
-A free Hugging Face Space sleeps after 48 hours without a request. At startup fast-body wakes every http server and waits up to 90 seconds before attaching. The boot log says which server `woke in N s`. A server that still fails is retried in the background a few times, and the settings page can attach it by hand after that.
-
 ### Memory
 
-Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours (6 by default) of the last thing you said and it carries on the same conversation. Leave it longer and it starts fresh. Six hours carries a morning into an afternoon and forgets last week. fast-agent itself only resumes when told to with `--resume`, which suits a person at a terminal; a robot has nobody to ask, so it needs a standing rule.
+Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours (6 by default) of the last thing you said and it carries on the same conversation, repeating its last words to show where it left off. Leave it longer and it starts fresh.
 
-A resumed run opens the companion page with the conversation in the transcript, and the robot repeats its own last words to show where it left off. Asking the brain for a greeting would cost a turn and write a user message you never said into the history.
+Conversations are kept in `~/.fast-body`, which survives app updates. The settings page lists them, with buttons to forget one or all. `ENABLE_MEMORY=false` stops saving and resuming.
 
-Conversations are kept in `~/.fast-body`, which survives app updates. Memory that disappears on an update is worse than none, because it looks like it works. The settings page lists them, with buttons to forget one or all. `ENABLE_MEMORY=false` stops saving and resuming.
-
-Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). fast-agent compacts at a fraction of the model's context window, and the router models report windows of about 1M tokens, so its default would not compact until about 850k. The startup `context:` line says whether that is active, because compaction is skipped for a model fast-agent doesn't know the context window of.
+Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). The startup `context:` line says whether that is active.
 
 ### Personalities
 
