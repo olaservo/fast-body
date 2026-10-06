@@ -19,7 +19,7 @@
 default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low
 
 # fast-body sets compaction.threshold at startup from FAST_BODY_CONTEXT_BUDGET
-# (a token count; see docs/design.md#memory). keep_turns survive verbatim.
+# (a token count; see README.md → Memory). keep_turns survive verbatim.
 compaction:
   auto: true
   keep_turns: 2

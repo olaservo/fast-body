@@ -8,8 +8,7 @@ Built to be:
 
 - **Provider-agnostic.** Pick any model from Anthropic, OpenAI, Google, Hugging Face Inference Providers or a local server in `fast-agent.config.yaml`.
 - **MCP-native.** Give the robot new abilities (home automation, web search, memory, …) by adding MCP servers. The companion web page also renders MCP Apps.
-
-Why it is built this way, and how it compares to the other Reachy Mini agent apps: [docs/design.md](docs/design.md).
+- **One brain.** The body controls are tools on the agent itself, so no second model decides what to say or drifts out of character, and nothing runs beside the robot.
 
 ## Architecture
 
@@ -27,7 +26,11 @@ Why it is built this way, and how it compares to the other Reachy Mini agent app
 
 The loop only moves *text* between the voice layer and the brain, so the model provider and the audio stack can each be swapped. The brain moves the robot by calling in-process tools. Moves run on their own thread, so speech and motion overlap.
 
-Around that loop: antenna cues show whose turn it is, the daemon tracks your face when the brain asks (`look_at_me`), `camera()` and `examine()` let the brain see, a companion browser page shows the transcript and takes typed input, and you can talk over the robot to interrupt it.
+Around that loop: antenna cues show whose turn it is, a companion browser page shows the transcript and takes typed input, and you can talk over the robot to interrupt it.
+
+Face tracking is the daemon's job. `look_at_me` switches on the daemon's tracker, which blends the aim into whatever pose we command, so eye contact holds through an emotion or a dance and the app spends nothing per frame.
+
+The brain has two ways to see. `camera()` hands the frame to the brain, which describes it in its own voice. `examine(question)` has a separate vision model read the frame and answer in words; the image never enters the conversation, which keeps the history small when the brain only needs a fact, like the number on a die.
 
 ## Install
 
@@ -67,15 +70,9 @@ default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low   # any fast-agent
 | `WEB_CHAT_TOKEN` | Password for the companion page. See [Companion page](#companion-page). |
 | `FAST_BODY_SERVERS` | MCP servers from `fast-agent.config.yaml` to attach, comma-separated. On a robot, add servers from the settings page instead, since an app update overwrites the packaged config. |
 
-### Home Assistant
+### MCP servers
 
-Home Assistant is an MCP server like any other. Add it from the settings page and the robot can control whatever you have exposed to Assist.
-
-1. In Home Assistant, add the **Model Context Protocol Server** integration (Settings → Devices & services → Add integration) and pick the Assist API.
-2. Create a long-lived access token at the bottom of your profile page.
-3. On fast-body's settings page, choose the **Home Assistant preset** and fill in `http://<ip>:8123/api/mcp` and the token. Use the IP address, because `.local` names are unreliable.
-
-Only entities [exposed to Assist](https://www.home-assistant.io/voice_control/voice_remote_expose_devices/) are reachable.
+Add servers from the settings page, which has a preset for Home Assistant's Model Context Protocol Server integration. Servers added there survive app updates.
 
 ### Servers that sleep
 
@@ -83,11 +80,13 @@ A free Hugging Face Space sleeps after 48 hours without a request. At startup fa
 
 ### Memory
 
-Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours (6 by default) of the last thing you said and it carries on the same conversation. Leave it longer and it starts fresh. A resumed run opens the companion page with the conversation in the transcript, and the robot says one line about where you left off.
+Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours (6 by default) of the last thing you said and it carries on the same conversation. Leave it longer and it starts fresh. Six hours carries a morning into an afternoon and forgets last week. fast-agent itself only resumes when told to with `--resume`, which suits a person at a terminal; a robot has nobody to ask, so it needs a standing rule.
 
-Conversations are kept in `~/.fast-body`, which survives app updates. The settings page lists them, with buttons to forget one or all. `ENABLE_MEMORY=false` stops saving and resuming.
+A resumed run opens the companion page with the conversation in the transcript, and the robot repeats its own last words to show where it left off. Asking the brain for a greeting would cost a turn and write a user message you never said into the history.
 
-Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). The startup `context:` line says whether that is active, because compaction is skipped for a model fast-agent doesn't know the context window of.
+Conversations are kept in `~/.fast-body`, which survives app updates. Memory that disappears on an update is worse than none, because it looks like it works. The settings page lists them, with buttons to forget one or all. `ENABLE_MEMORY=false` stops saving and resuming.
+
+Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). fast-agent compacts at a fraction of the model's context window, and the router models report windows of about 1M tokens, so its default would not compact until about 850k. The startup `context:` line says whether that is active, because compaction is skipped for a model fast-agent doesn't know the context window of.
 
 ### Personalities
 
