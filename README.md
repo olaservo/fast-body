@@ -4,6 +4,8 @@
 
 fast-agent is the brain and the Reachy Mini is its body. You talk to the robot, a fast-agent decides what to say *and how to move*, and the robot speaks and expresses itself: turning its head, flicking its antennas, playing emotions and dances, following your face, looking through its camera.
 
+**[Watch the demo](https://www.youtube.com/watch?v=_3PSoIxU2Zo)** to see it in action.
+
 Built to be:
 
 - **Provider-agnostic.** Pick any model from Anthropic, OpenAI, Google, Hugging Face Inference Providers or a local server in `fast-agent.config.yaml`.
