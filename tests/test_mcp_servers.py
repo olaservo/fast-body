@@ -455,3 +455,20 @@ def test_retry_gives_up_after_the_last_delay(store, monkeypatch, caplog):
         asyncio.run(mcp_servers.retry_failed(brain, ["b"]))
     assert brain.attach_calls == []
     assert "gave up on b" in caplog.text
+
+
+def test_a_hub_url_without_a_bearer_uses_the_robots_hub_login(store, fake_httpx, monkeypatch):
+    monkeypatch.setattr(mcp_servers, "_hub_token", lambda: "hf_robot")
+    mcp_servers.save_server("space", transport="http", url="https://o-foo.hf.space/mcp")
+    mcp_servers.save_server("own", transport="http", url="https://k.hf.space/mcp", bearer_token="hf_x")
+    mcp_servers.save_server("other", transport="http", url="https://x.test/mcp")
+    asyncio.run(mcp_servers.warm_up())
+    assert sorted(fake_httpx.requests) == [
+        ("https://k.hf.space/mcp", {"Authorization": "Bearer hf_x"}),
+        ("https://o-foo.hf.space/mcp", {"Authorization": "Bearer hf_robot"}),
+        ("https://x.test/mcp", {}),
+    ]
+    assert "hf_robot" not in store.read_text()
+    assert [s["hub_login"] for s in mcp_servers.list_servers()] == [False, False, True]
+    config = mcp_servers._server_config(mcp_servers._load()["space"])
+    assert config.headers["Authorization"] == "Bearer hf_robot"

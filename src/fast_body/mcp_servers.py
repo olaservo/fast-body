@@ -21,6 +21,7 @@ import logging
 import shlex
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -94,6 +95,34 @@ def _write(servers: dict[str, dict[str, Any]]) -> bool:
         return False
 
 
+def _hub_token() -> str | None:
+    """The robot's own Hub login: HF_TOKEN, else the token `hf auth login` saved."""
+    try:
+        from huggingface_hub import get_token
+
+        return get_token()
+    except Exception as e:
+        logger.debug("no hub token: %s", e)
+        return None
+
+
+def _is_hub_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("hf.co", "huggingface.co") or host.endswith(".hf.space")
+
+
+def _headers(entry: dict[str, Any]) -> dict[str, str]:
+    """The entry's headers. A Hugging Face URL with no Authorization of its own
+    gets the robot's Hub login, so a private Space needs no token on the page."""
+    headers = {str(k): str(v) for k, v in (entry.get("headers") or {}).items()}
+    url = entry.get("url")
+    if isinstance(url, str) and _is_hub_url(url) and not any(k.lower() == "authorization" for k in headers):
+        token = _hub_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _enabled(entry: dict[str, Any]) -> bool:
     return entry.get("enabled", True) is not False
 
@@ -102,6 +131,7 @@ def list_servers() -> list[dict[str, Any]]:
     """The stored servers as the page shows them. Header values never leave."""
     out = []
     for name, entry in sorted(_load().items()):
+        has_bearer = bool((entry.get("headers") or {}).get("Authorization"))
         out.append(
             {
                 "name": name,
@@ -110,7 +140,8 @@ def list_servers() -> list[dict[str, Any]]:
                 "url": entry.get("url") or "",
                 "command": entry.get("command") or "",
                 "args": shlex.join(entry.get("args") or []),
-                "has_bearer": bool((entry.get("headers") or {}).get("Authorization")),
+                "has_bearer": has_bearer,
+                "hub_login": not has_bearer and _is_hub_url(entry.get("url") or ""),
                 "error": _errors.get(name, ""),
             }
         )
@@ -200,6 +231,9 @@ def _server_config(entry: dict[str, Any]) -> Any:
     from fast_agent.config import MCPServerSettings
 
     fields = {k: v for k, v in entry.items() if k != "enabled"}
+    headers = _headers(entry)
+    if headers:
+        fields["headers"] = headers
     # fast-agent's default elicitation is an interactive prompt nobody sees on
     # a headless robot, and the turn hangs on it. choices.py's handler outranks
     # this when bound; a hand-written `elicitation:` still wins.
@@ -293,7 +327,7 @@ async def warm_up(names: list[str] | None = None) -> str:
         return "nothing to warm"
 
     async def one(name: str, entry: dict[str, Any]) -> str:
-        headers = {k: str(v) for k, v in (entry.get("headers") or {}).items()}
+        headers = _headers(entry)
         started = _clock()
         try:
             async with httpx.AsyncClient(timeout=WARM_UP_TIMEOUT_S, follow_redirects=True) as client:

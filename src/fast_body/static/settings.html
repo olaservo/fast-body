@@ -191,7 +191,7 @@
     </div>
     <div class="field mcp-http">
       <label for="mcp-bearer">Bearer token</label>
-      <span class="hint">Optional. Sent as <code>Authorization: Bearer …</code>. Never shown back — leave blank to keep the current one. A server that needs a browser OAuth flow won't work from a headless robot.</span>
+      <span class="hint">Optional. Sent as <code>Authorization: Bearer …</code>. Never shown back — leave blank to keep the current one. A Hugging Face URL (a private Space) with none uses the robot's own HF login. A server that needs a browser OAuth flow won't work from a headless robot.</span>
       <input type="password" id="mcp-bearer" autocomplete="off" spellcheck="false" />
     </div>
     <div class="field mcp-stdio" hidden>
@@ -558,7 +558,7 @@
     mcpTransport.value = s.transport;
     f.url.value = s.url;
     f.bearer.value = "";
-    f.bearer.placeholder = s.has_bearer ? "unchanged" : "";
+    f.bearer.placeholder = s.has_bearer ? "unchanged" : s.hub_login ? "robot's HF login" : "";
     f.command.value = s.command;
     f.args.value = s.args;
     showTransport();
