@@ -7,9 +7,6 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
-[manifest]
-overrides = [{ name = "starlette", specifier = "==1.7.0" }]
-
 [[package]]
 name = "a2a-sdk"
 version = "1.2.2"
@@ -738,7 +735,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
-    { name = "reachy-mini", specifier = ">=1.9.0" },
+    { name = "reachy-mini", specifier = ">=1.12.0" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
@@ -2974,7 +2971,7 @@ wheels = [
 
 [[package]]
 name = "reachy-mini"
-version = "1.9.0"
+version = "1.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -3004,16 +3001,15 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "rustypot" },
-    { name = "scipy" },
     { name = "starlette" },
     { name = "toml" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
     { name = "zeroconf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/ae/da44c9dd1d7c67715fef69b0a78c22ec21384fbcc3a63300b1da821acf94/reachy_mini-1.9.0.tar.gz", hash = "sha256:3a7e022cd585396c4b5ba7dbf356f93509cba9211bb1e06d90417dec7a3ee7cf", size = 23496378, upload-time = "2026-07-09T15:53:05.795Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/14/533a24c473de3054f56351fc46decf7e3d82efd4d95e8a0db6e08fcfd4c9/reachy_mini-1.12.0.tar.gz", hash = "sha256:5fc149a8d45034e909629a46d56f473d8ff01503d4ca111b8ad5f7b42285c172", size = 24178044, upload-time = "2026-10-15T13:06:20.465Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/06/c27a17a3d922e419d83cb7427c47cf5a95dba94578a16374f642d3df26f3/reachy_mini-1.9.0-py3-none-any.whl", hash = "sha256:9d3f8551c42bd12b43f47a1f3fe5e8c39ca0c2ff6d02c27b094ed0f5586c7655", size = 23577272, upload-time = "2026-07-09T15:53:01.96Z" },
+    { url = "https://files.pythonhosted.org/packages/05/90/25732d1239b54f833f0d54a92dfb4443df9746791c6cfb2e0c7e4553f09f/reachy_mini-1.12.0-py3-none-any.whl", hash = "sha256:bcb27d09e1bddc67874bd281d7fa59f08cb4d4b5a3cc5858cd9ffd7de7660b34", size = 24264318, upload-time = "2026-10-15T13:06:16.98Z" },
 ]
 
 [[package]]

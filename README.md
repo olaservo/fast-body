@@ -62,7 +62,7 @@ The robot's daemon installs apps from Hugging Face Spaces, so a deploy is a Spac
    ---
    ```
 
-2. Before pushing, remove `reachy-mini` from `[project.dependencies]`: the daemon pre-installs it, and its `starlette` pin conflicts with fast-agent's. Leave `tests/` and `scripts/` out as well, or the Space's secret scanner may refuse the push.
+2. Leave `tests/` and `scripts/` out of the Space, or its secret scanner may refuse the push.
 
 3. Install it from the Reachy Mini app, which lists private Spaces too once the robot is logged in to Hugging Face.
 
