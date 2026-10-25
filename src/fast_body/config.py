@@ -108,6 +108,66 @@ def export_memory_env() -> Path:
 MEMORY_DIR = export_memory_env()
 
 
+# ── Hugging Face login ─────────────────────────────────────────────────────
+# The daemon keeps the robot's Hub login (the dashboard's sign-in) in a store of
+# its own, with a refresh token, and reads only that; the file `hf auth login`
+# writes belongs to the user and goes stale on a robot nobody logs in to from a
+# shell. The brain's `hf.` models and the MCP servers on hf.co read HF_TOKEN,
+# so hand them the daemon's token when nothing else set one.
+def _daemon_credentials_path() -> Path:
+    try:
+        from huggingface_hub.constants import HF_TOKEN_PATH  # honours HF_HOME, like the daemon
+
+        return Path(HF_TOKEN_PATH).with_name("reachy_mini_daemon_credentials.json")
+    except Exception:
+        return Path.home() / ".cache" / "huggingface" / "reachy_mini_daemon_credentials.json"
+
+
+DAEMON_CREDENTIALS = _daemon_credentials_path()
+
+
+def daemon_hf_token(path: Path = DAEMON_CREDENTIALS, now: float | None = None) -> str | None:
+    """The daemon's Hub access token, or None when there is none worth using.
+
+    The store is the daemon's `_Stored` record: `access_token`, `signed_out`,
+    and `expires_at` in epoch seconds. Anything unreadable reads as no token.
+    """
+    import json
+    import time
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("signed_out"):
+        return None
+    token = data.get("access_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    expires_at = data.get("expires_at")
+    if isinstance(expires_at, (int, float)) and expires_at <= (time.time() if now is None else now):
+        return None
+    return token.strip()
+
+
+def export_hf_token_env() -> str:
+    """Set HF_TOKEN from the daemon's login when it is unset; return where the token comes from.
+
+    Runs at import, before fast-agent reads its provider keys. A set HF_TOKEN
+    wins, so a developer's own token still applies.
+    """
+    if os.getenv("HF_TOKEN", "").strip():
+        return "environment"
+    token = daemon_hf_token(DAEMON_CREDENTIALS)
+    if token is None:
+        return "not set (huggingface_hub falls back to the `hf auth login` file)"
+    os.environ["HF_TOKEN"] = token
+    return f"the daemon's login ({DAEMON_CREDENTIALS})"
+
+
+HF_TOKEN_SOURCE = export_hf_token_env()
+
+
 def _flag(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
@@ -134,7 +194,8 @@ def config_sources() -> str:
     return (
         f".env={_DOTENV or 'not found'}; "
         f"fast-agent.config.yaml={FAST_AGENT_CONFIG or 'not found (fast-agent will search)'}; "
-        f"memory={MEMORY_DIR}; skills={MEMORY_DIR / 'skills'}; personalities={MEMORY_DIR / 'personalities'}"
+        f"memory={MEMORY_DIR}; skills={MEMORY_DIR / 'skills'}; personalities={MEMORY_DIR / 'personalities'}; "
+        f"HF_TOKEN={HF_TOKEN_SOURCE}"
     )
 
 

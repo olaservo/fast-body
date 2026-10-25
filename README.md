@@ -83,7 +83,7 @@ default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low   # any fast-agent
 | Variable | Meaning |
 |---|---|
 | `OPENAI_API_KEY` | Speech recognition and speech. Not needed with `VOICE_BACKEND=text` or `none`. |
-| `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | Brain key matching `default_model`. Not needed for an `hf.` model. |
+| `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | Brain key matching `default_model`. Not needed for an `hf.` model, which uses the robot's Hugging Face login: the dashboard sign-in, or `HF_TOKEN` if set. |
 | `VOICE_BACKEND` | `openai` (default), `realtime` (streaming recognition), `text` (type instead of speak), or `none` (the companion page only). |
 | `FAST_BODY_PERSONALITY` | Which personality card the robot plays (`default`). See [Personalities](#personalities). |
 | `OPENAI_TTS_VOICE` / `TTS_DELIVERY` | Override the card's voice and how it speaks. Blank or `auto` follows the card. |
