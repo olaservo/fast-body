@@ -376,7 +376,7 @@ def test_forget_all_clears_the_page(server, client, monkeypatch):
 
 def test_page_speaks_the_host_bridge(client):
     page = client.get("/?token=s3cret").text
-    for method in ("ui/initialize", "ui/notifications/tool-input", "ui/notifications/tool-result", "tools/call"):
+    for method in ("ui/initialize", "ui/notifications/tool-input", "ui/notifications/tool-result", "tools/call", "ui/message", "ui/open-link"):
         assert method in page
     assert "allow-scripts allow-forms" in page
 

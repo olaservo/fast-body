@@ -544,6 +544,30 @@
       .catch(function (e) { refuse(state, request.id, -32000, String(e)); });
   }
 
+  // A widget's message reaches the brain the way typed input does.
+  function messageFromWidget(state, request) {
+    var content = (request.params && request.params.content) || [];
+    var text = content.filter(function (c) { return c && c.type === "text"; })
+      .map(function (c) { return c.text; }).join("\n").trim();
+    if (!text || !socket || socket.readyState !== WebSocket.OPEN) {
+      reply(state, request.id, { isError: true });
+      return;
+    }
+    socket.send(JSON.stringify({ text: text }));
+    reply(state, request.id, {});
+  }
+
+  // Only web links, in a new tab that cannot reach back to this page.
+  function openLinkFromWidget(state, request) {
+    var url = request.params && request.params.url;
+    var opened = null;
+    if (typeof url === "string" && /^https?:\/\//i.test(url)) {
+      opened = window.open(url, "_blank");
+      if (opened) opened.opener = null;
+    }
+    reply(state, request.id, opened ? {} : { isError: true });
+  }
+
   window.addEventListener("message", function (event) {
     var state = widgetFor(event.source);
     var data = event.data;
@@ -553,7 +577,7 @@
       reply(state, data.id, {
         protocolVersion: PROTOCOL_VERSION,
         hostInfo: { name: "fast-body", version: "0.1.0" },
-        hostCapabilities: { serverTools: {}, logging: {} },
+        hostCapabilities: { serverTools: {}, logging: {}, openLinks: {}, message: { text: {} } },
         hostContext: hostContext()
       });
     } else if (data.method === "ui/notifications/initialized") {
@@ -568,6 +592,10 @@
       if (atBottom) log.scrollTop = log.scrollHeight;
     } else if (data.method === "tools/call") {
       callFromWidget(state, data);
+    } else if (data.method === "ui/message") {
+      messageFromWidget(state, data);
+    } else if (data.method === "ui/open-link") {
+      openLinkFromWidget(state, data);
     } else if (data.method === "ping") {
       reply(state, data.id, {});
     } else if (data.method === "notifications/message") {

@@ -168,7 +168,7 @@ The app serves a chat page on port 8080. Under the daemon, the desktop app and d
 
 The page shows the transcript live and has an input box, so typing reaches the brain the same way speaking does. It shows what the robot is doing during a long turn, and a Stop button interrupts a reply.
 
-The page is also an [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) host. When the brain calls a tool that an MCP server pairs with a `ui://` resource, the page draws that resource's HTML, opening it as the call starts and filling it with the result. A widget can call tools itself, and the text of those results reaches the conversation so the brain hears about it.
+The page is also an [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) host. When the brain calls a tool that an MCP server pairs with a `ui://` resource, the page draws that resource's HTML, opening it as the call starts and filling it with the result. A widget can call tools itself, and the text of those results reaches the conversation so the brain hears about it. A widget can also send a message to the brain as if you had typed it, and open a web link in a new tab.
 
 The page is open to your network by default, and anyone who can reach it can talk through the robot and change its settings. To lock it, set a password under "Who can open this page" on the settings page. A browser then asks for it once and stays signed in. There is no TLS, so use the password on a network you trust. `WEB_CHAT_HOST=127.0.0.1` keeps the page on the robot itself.
 
