@@ -125,6 +125,13 @@
     </div>
 
     <div class="field">
+      <label for="LISTEN_MODE">LISTEN_MODE</label>
+      <span class="hint"><code>always_on</code> keeps the mic live. <code>push_to_talk</code> closes it until you hold an antenna or the chat page's Talk button, and letting go sends what you said. Needs <code>VOICE_BACKEND=realtime</code>. Applies the next time the app starts.</span>
+      <select id="LISTEN_MODE" disabled></select>
+      <span class="state" id="state-LISTEN_MODE"></span>
+    </div>
+
+    <div class="field">
       <label for="ENABLE_MEMORY">ENABLE_MEMORY</label>
       <span class="hint">Whether the robot keeps what was said after it is switched off. Off stops it saving and resuming; what it already wrote down stays below until you delete it. Applies the next time the app starts.</span>
       <select id="ENABLE_MEMORY" disabled></select>
@@ -250,6 +257,7 @@
     OPENAI_TTS_VOICE: { el: document.getElementById("OPENAI_TTS_VOICE"), loaded: false },
     FACE_TRACKING: { el: document.getElementById("FACE_TRACKING"), loaded: false },
     ENABLE_MEMORY: { el: document.getElementById("ENABLE_MEMORY"), loaded: false },
+    LISTEN_MODE: { el: document.getElementById("LISTEN_MODE"), loaded: false },
   };
 
   document.getElementById("chat-link").href = "/" + q;
@@ -329,6 +337,7 @@
     renderVoice(data.voice);
     renderToggle("FACE_TRACKING", data.face_tracking, "off");
     renderToggle("ENABLE_MEMORY", data.memory, "on");
+    renderToggle("LISTEN_MODE", data.listen_mode, "always_on");
     NAMES.forEach(function (name) {
       var el = document.getElementById("state-" + name);
       var isSet = data.keys && data.keys[name];

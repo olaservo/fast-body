@@ -93,10 +93,19 @@ def cast_instruction(cast: Any) -> str:
     )
 
 
-def compose_instruction(persona: str, cast: Any = None) -> str:
+PUSH_TO_TALK_INSTRUCTION = """\
+You have a microphone, and it is on push-to-talk: you hear the person only while they \
+hold one of your antennas or the Talk button on your page, and what they said reaches \
+you when they let go. Between holds you hear nothing from the room, so don't claim to \
+have heard sounds you were not given.
+"""
+
+
+def compose_instruction(persona: str, cast: Any = None, push_to_talk: bool = False) -> str:
     """The full system instruction: the personality, the shared body guide, the voices, the skills."""
     persona = persona.strip()
-    body = f"{EMBODIMENT_INSTRUCTION}\n{cast_instruction(cast)}{_skills_block()}"
+    listening = f"{PUSH_TO_TALK_INSTRUCTION}\n" if push_to_talk else ""
+    body = f"{EMBODIMENT_INSTRUCTION}\n{listening}{cast_instruction(cast)}{_skills_block()}"
     if not persona:
         return body
     return f"{persona}\n\n{body}"

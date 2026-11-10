@@ -73,9 +73,17 @@ class FakeEvent:
 class FakeInputBuffer:
     def __init__(self) -> None:
         self.appended: list[str] = []
+        self.commits = 0
+        self.clears = 0
 
     async def append(self, audio: str) -> None:
         self.appended.append(audio)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def clear(self) -> None:
+        self.clears += 1
 
 
 class FakeConn:
@@ -384,3 +392,203 @@ async def test_session_is_only_confirmed_by_session_updated(backend: RealtimeVoi
 
     await backend._consume(FakeConn([FakeEvent("session.updated")]))
     assert backend._session_confirmed
+
+
+# ── push-to-talk ──────────────────────────────────────────────────────────
+@pytest.fixture
+def ptt(monkeypatch) -> RealtimeVoiceBackend:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("VOICE_BACKEND", "realtime")
+    monkeypatch.setenv("LISTEN_MODE", "push_to_talk")
+    made = RealtimeVoiceBackend(Config(), FakeRobotAudio(FakeMedia()))
+    made._ensure_session = lambda: None  # type: ignore[method-assign]
+    made._conn = FakeConn()
+    return made
+
+
+def _speech_like(n: int, rate: int = 16000) -> np.ndarray:
+    """Audio the VAD takes for speech: a voiced buzz with harmonics, not a pure tone."""
+    t = np.arange(n) / rate
+    f0 = 140.0
+    voiced = sum(np.sin(2 * np.pi * f0 * k * t) / k for k in range(1, 12))
+    return (0.3 * voiced / np.max(np.abs(voiced))).astype(np.float32)
+
+
+def test_push_to_talk_session_has_no_turn_detection(ptt: RealtimeVoiceBackend) -> None:
+    audio_in = ptt._session_config()["audio"]["input"]
+    assert audio_in["turn_detection"] is None
+    assert audio_in["transcription"]["model"] == "gpt-live-transcribe"
+
+
+def test_push_to_talk_session_config_validates_against_the_sdk(ptt: RealtimeVoiceBackend) -> None:
+    event = SessionUpdateEvent.model_validate(
+        {"type": "session.update", "event_id": "test", "session": ptt._session_config()}
+    )
+    assert isinstance(event.session, RealtimeTranscriptionSessionCreateRequest)
+    assert event.session.audio.input.turn_detection is None
+
+
+def test_push_to_talk_model_follows_its_own_setting(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("LISTEN_MODE", "push_to_talk")
+    monkeypatch.setenv("REALTIME_PTT_STT_MODEL", "gpt-transcribe")
+    made = RealtimeVoiceBackend(Config(), FakeRobotAudio(FakeMedia()))
+    assert made._session_config()["audio"]["input"]["transcription"]["model"] == "gpt-transcribe"
+
+
+async def test_gate_starts_closed_and_the_pump_drains_the_mic_without_sending(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("LISTEN_MODE", "push_to_talk")
+    media = FakeMedia([np.zeros(1600, dtype=np.float32)] * 3, in_rate=16000)
+    made = RealtimeVoiceBackend(Config(), FakeRobotAudio(media))
+    conn = FakeConn()
+
+    pump = asyncio.ensure_future(made._pump_mic(conn))
+    await asyncio.sleep(0.1)
+    pump.cancel()
+
+    assert conn.input_audio_buffer.appended == []
+    assert media._samples == []  # read and dropped, not left to pile up for the next hold
+
+
+async def test_opening_the_gate_lets_the_mic_through_and_counts_the_hold(ptt: RealtimeVoiceBackend) -> None:
+    ptt._robot.media._samples = [_speech_like(1600)] * 2  # 200 ms
+    conn = FakeConn()
+    await ptt.on_listen_open(continuous=True)
+
+    pump = asyncio.ensure_future(ptt._pump_mic(conn))
+    await asyncio.sleep(0.1)
+    pump.cancel()
+
+    assert len(conn.input_audio_buffer.appended) == 2
+    assert ptt._ptt_ms_since_open == pytest.approx(200.0)
+    assert ptt._ptt_speech_since_open is True
+
+
+async def test_silence_during_a_hold_is_pumped_but_not_counted_as_speech(ptt: RealtimeVoiceBackend) -> None:
+    ptt._robot.media._samples = [np.zeros(1600, dtype=np.float32)] * 2
+    conn = FakeConn()
+    await ptt.on_listen_open(continuous=True)
+
+    pump = asyncio.ensure_future(ptt._pump_mic(conn))
+    await asyncio.sleep(0.1)
+    pump.cancel()
+
+    assert len(conn.input_audio_buffer.appended) == 2
+    assert ptt._ptt_speech_since_open is False
+
+
+async def test_release_commits_a_hold_with_speech_in_it(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_open(continuous=True)
+    ptt._ptt_ms_since_open = 1200.0
+    ptt._ptt_speech_since_open = True
+    await ptt.on_listen_close(commit=True)
+
+    assert ptt._conn.input_audio_buffer.commits == 1
+    assert ptt._gated.is_set()
+    assert ptt._ptt_ms_since_open == 0.0  # counters reset for the next hold
+
+
+async def test_a_brush_of_the_antenna_commits_nothing(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_open(continuous=True)
+    ptt._ptt_ms_since_open = 60.0
+    ptt._ptt_speech_since_open = True
+    await ptt.on_listen_close(commit=True)
+
+    assert ptt._conn.input_audio_buffer.commits == 0
+    assert ptt._conn.input_audio_buffer.clears == 1  # so it does not ride along with the next hold
+
+
+async def test_a_silent_hold_commits_nothing(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_open(continuous=True)
+    ptt._ptt_ms_since_open = 1500.0
+    ptt._ptt_speech_since_open = False
+    await ptt.on_listen_close(commit=True)
+
+    assert ptt._conn.input_audio_buffer.commits == 0
+    assert ptt._conn.input_audio_buffer.clears == 1
+
+
+async def test_a_turn_the_server_already_ended_is_not_committed_again(ptt: RealtimeVoiceBackend) -> None:
+    """A server that runs its VAD despite turn_detection=null commits on its own (seen on the HF backend)."""
+    await ptt.on_listen_open(continuous=True)
+    ptt._ptt_ms_since_open = 1500.0
+    ptt._ptt_speech_since_open = True
+    await ptt._consume(FakeConn([FakeEvent("input_audio_buffer.speech_stopped")]))
+    await ptt.on_listen_close(commit=True)
+
+    assert ptt._conn.input_audio_buffer.commits == 0
+    assert ptt._conn.input_audio_buffer.clears == 0
+
+
+async def test_a_mode_change_closes_without_committing(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_open(continuous=True)
+    ptt._ptt_ms_since_open = 1500.0
+    ptt._ptt_speech_since_open = True
+    await ptt.on_listen_close(commit=False)
+    assert ptt._conn.input_audio_buffer.commits == 0
+
+
+async def test_release_without_a_session_is_harmless(ptt: RealtimeVoiceBackend) -> None:
+    ptt._conn = None
+    await ptt.on_listen_open(continuous=True)
+    await ptt.on_listen_close(commit=True)
+    assert ptt._gated.is_set()
+
+
+async def test_opening_the_gate_is_the_barge_in(ptt: RealtimeVoiceBackend) -> None:
+    """No speech_started arrives without server VAD, so the gate cuts the reply itself."""
+    playing = asyncio.ensure_future(ptt._play_with_barge_in(duration=5.0))
+    await asyncio.sleep(0)
+    await ptt.on_listen_open(continuous=True)
+    await asyncio.wait_for(playing, timeout=1.0)
+    assert ptt._robot.media.cleared >= 1
+
+
+async def test_opening_the_gate_tells_the_body_only_while_listening(ptt: RealtimeVoiceBackend) -> None:
+    onsets: list[int] = []
+    ptt.on_speech_start(lambda: onsets.append(1))
+
+    await ptt.on_listen_open(continuous=True)  # mid-reply: a barge-in, not a turn
+    assert onsets == []
+
+    pending = asyncio.ensure_future(ptt.listen())
+    await asyncio.sleep(0)
+    await ptt.on_listen_open(continuous=True)
+    assert onsets == [1]
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+
+async def test_a_mode_change_reconnects_a_running_session(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    made = RealtimeVoiceBackend(Config(), FakeRobotAudio(FakeMedia()))
+    opened: list[int] = []
+
+    async def fake_session() -> None:
+        opened.append(1)
+        await asyncio.Event().wait()
+
+    made._run_session = fake_session  # type: ignore[method-assign]
+    made._ensure_session()
+    first = made._session_task
+    await asyncio.sleep(0)
+
+    await made.on_listen_mode_changed("push_to_talk")
+    assert first is not None and first.cancelled()
+    assert made._session_task is not first and not made._session_task.done()
+    assert made._push_to_talk is True
+    assert made._session_config()["audio"]["input"]["turn_detection"] is None
+    await asyncio.sleep(0)
+    assert opened == [1, 1]
+
+    made._session_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await made._session_task
+
+
+async def test_a_mode_change_with_no_session_waits_for_the_next_listen(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_mode_changed("always_on")
+    assert ptt._session_task is None
+    assert ptt._session_config()["audio"]["input"]["turn_detection"]["type"] == "server_vad"

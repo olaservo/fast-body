@@ -261,6 +261,13 @@ class MovementManager:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+        # Published by the control thread once per tick, read from any other:
+        # the antenna targets just sent (so a reader can subtract them from the
+        # measured positions) and whether a real move, not breathing, is playing.
+        self._shared_lock = threading.Lock()
+        self._shared_commanded_antennas: tuple[float, float] = (0.0, 0.0)
+        self._shared_move_active = False
+
     # ── public, thread-safe API ──────────────────────────────────────────
     def queue_move(self, move: Move) -> None:
         self._commands.put(("queue", move))
@@ -270,8 +277,28 @@ class MovementManager:
 
     def set_listening(self, listening: bool) -> None:
         """While listening, suppress idle breathing so the robot holds still and
-        visibly 'pays attention'. Thread-safe."""
+        visibly 'pays attention'. A breathing move already playing ends at
+        once, antennas held where they are. Thread-safe."""
         self._commands.put(("listening", bool(listening)))
+
+    def commanded_antennas(self) -> tuple[float, float]:
+        """The antenna positions last sent to the robot (rad). Thread-safe.
+
+        Measured minus this is the residual a hand on an antenna leaves, which
+        is what the push-to-talk hold detector reads: the robot's own motion,
+        breathing included, cancels out.
+        """
+        with self._shared_lock:
+            return self._shared_commanded_antennas
+
+    def move_active(self) -> bool:
+        """True while an emotion, dance, look or antenna cue is playing. Thread-safe.
+
+        Breathing does not count: it is slow enough for the residual to cancel,
+        where a fast commanded move leaves the servos lagging by up to 0.4 rad.
+        """
+        with self._shared_lock:
+            return self._shared_move_active
 
     def current_pose(self) -> tuple[NDArray[np.float64], tuple[float, float]]:
         """Best-effort current (head_pose, antennas) for seeding a new move.
@@ -326,6 +353,10 @@ class MovementManager:
             elif cmd == "listening":
                 self._listening = payload
                 self.state.last_activity_time = self._now()
+                if payload and isinstance(self.state.current_move, BreathingMove):
+                    self.state.current_move = None
+                    self.state.move_start_time = None
+                    self._breathing = False
 
     def _advance_queue(self, now: float) -> None:
         cur = self.state.current_move
@@ -376,15 +407,23 @@ class MovementManager:
         assert last is not None
         return (last[0].copy(), last[1], last[2])
 
+    def _step(self, now: float) -> None:
+        """One control tick: apply commands, advance the queue, send the pose, publish it."""
+        self._drain_commands()
+        self._advance_queue(now)
+        self._maybe_breathe(now)
+        head, antennas, body_yaw = self._primary_pose(now)
+        try:
+            self.robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
+        except Exception as e:
+            logger.debug("set_target failed: %s", e)
+        move = self.state.current_move
+        with self._shared_lock:
+            self._shared_commanded_antennas = antennas
+            self._shared_move_active = move is not None and not isinstance(move, BreathingMove)
+
     def _run_loop(self) -> None:
         while not self._stop.is_set():
             start = self._now()
-            self._drain_commands()
-            self._advance_queue(start)
-            self._maybe_breathe(start)
-            head, antennas, body_yaw = self._primary_pose(start)
-            try:
-                self.robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
-            except Exception as e:
-                logger.debug("set_target failed: %s", e)
+            self._step(start)
             time.sleep(max(0.0, self.period - (self._now() - start)))

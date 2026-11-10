@@ -31,6 +31,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from fast_body.voice.base import supports_push_to_talk
+
 if TYPE_CHECKING:
     from fast_body.voice.base import VoiceBackend
 
@@ -232,6 +234,25 @@ class CastVoiceBackend:
 
     def interrupt(self) -> None:
         self._inner.interrupt()
+
+    # ── push-to-talk hooks, forwarded to the audio backend when it has them ──
+    def supports_push_to_talk(self) -> bool:
+        return supports_push_to_talk(self._inner)
+
+    async def on_listen_open(self, *, continuous: bool) -> None:
+        hook = getattr(self._inner, "on_listen_open", None)
+        if hook is not None:
+            await hook(continuous=continuous)
+
+    async def on_listen_close(self, *, commit: bool) -> None:
+        hook = getattr(self._inner, "on_listen_close", None)
+        if hook is not None:
+            await hook(commit=commit)
+
+    async def on_listen_mode_changed(self, mode: str) -> None:
+        hook = getattr(self._inner, "on_listen_mode_changed", None)
+        if hook is not None:
+            await hook(mode)
 
     async def aclose(self) -> None:
         await self._inner.aclose()

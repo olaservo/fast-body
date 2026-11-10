@@ -23,6 +23,31 @@ def client(server):
     return TestClient(server._build_app())
 
 
+_ids = iter(range(1, 1_000_000))
+
+
+def call(ws, method, **params):
+    """Send one request; return (its reply, the notifications that came first)."""
+    request_id = next(_ids)
+    ws.send_json({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    notes = []
+    while True:
+        message = ws.receive_json()
+        if message.get("id") == request_id:
+            return message, notes
+        notes.append(message)
+
+
+def result(ws, method, **params):
+    reply, _ = call(ws, method, **params)
+    assert "result" in reply, reply
+    return reply["result"]
+
+
+def without_seq(params):
+    return {k: v for k, v in params.items() if k != "seq"}
+
+
 # ── access control ────────────────────────────────────────────────────────
 def test_page_asks_for_the_password(client):
     """The dashboard's button opens the bare URL, so that has to land somewhere useful."""
@@ -90,8 +115,8 @@ def test_login_form_returns_to_the_page_asked_for(client):
 
 def test_cookie_opens_the_socket(client):
     client.post("/login", data={"token": "s3cret"}, follow_redirects=False)
-    with client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["role"] == "history"
+    with client.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.history") == {"events": []}
 
 
 def test_wrong_cookie_is_refused(client):
@@ -113,26 +138,57 @@ def test_status_reports_the_lock(client, open_client):
 
 def test_socket_needs_the_token(client):
     with pytest.raises(Exception):
-        with client.websocket_connect("/ws"):
+        with client.websocket_connect("/rpc"):
             pass
 
 
 def test_socket_rejects_a_wrong_token(client):
     with pytest.raises(Exception):
-        with client.websocket_connect("/ws?token=nope"):
+        with client.websocket_connect("/rpc?token=nope"):
             pass
 
 
 def test_socket_rejects_a_foreign_origin(client):
     """A page on another site must not be able to drive the robot."""
     with pytest.raises(Exception):
-        with client.websocket_connect("/ws?token=s3cret", headers={"origin": "http://evil.example"}):
+        with client.websocket_connect("/rpc?token=s3cret", headers={"origin": "http://evil.example"}):
             pass
 
 
 def test_socket_accepts_its_own_origin(client):
-    with client.websocket_connect("/ws?token=s3cret", headers={"origin": "http://testserver"}) as ws:
-        assert ws.receive_json()["role"] == "history"
+    with client.websocket_connect("/rpc?token=s3cret", headers={"origin": "http://testserver"}) as ws:
+        assert result(ws, "conversation.history") == {"events": []}
+
+
+def test_the_daemon_relay_needs_no_token(server):
+    """The relay connects from loopback with no Origin; the daemon authenticated the far end."""
+    relay = TestClient(server._build_app(), client=("127.0.0.1", 50000))
+    with relay.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.history") == {"events": []}
+
+
+def test_a_browser_on_loopback_still_needs_the_token(server):
+    """A browser always sends Origin, so a page on this machine is not taken for the relay."""
+    local = TestClient(server._build_app(), client=("127.0.0.1", 50000))
+    with pytest.raises(Exception):
+        with local.websocket_connect("/rpc", headers={"origin": "http://testserver"}):
+            pass
+
+
+def test_another_machine_without_origin_needs_the_token(client):
+    with pytest.raises(Exception):
+        with client.websocket_connect("/rpc"):
+            pass
+
+
+def test_unknown_methods_are_refused(open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        reply, _ = call(ws, "nope")
+    assert reply["error"]["code"] == -32601
+
+
+def test_the_apps_namespace_is_left_to_the_daemon(open_server):
+    assert not [name for name in open_server.rpc._methods if name.startswith("apps.")]
 
 
 @pytest.fixture
@@ -151,13 +207,13 @@ def test_no_token_configured_serves_the_page(open_client):
 
 
 def test_no_token_configured_accepts_the_socket(open_client):
-    with open_client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["role"] == "history"
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.history") == {"events": []}
 
 
 def test_open_socket_still_rejects_a_foreign_origin(open_client):
     with pytest.raises(Exception):
-        with open_client.websocket_connect("/ws", headers={"origin": "http://evil.example"}):
+        with open_client.websocket_connect("/rpc", headers={"origin": "http://evil.example"}):
             pass
 
 
@@ -173,18 +229,72 @@ def test_url_without_a_token_is_bare(open_server):
 def test_history_is_replayed_to_a_new_client(server, client):
     server.hub.echo_user("hello")
     server.hub.echo("hi there")
-    with client.websocket_connect("/ws?token=s3cret") as ws:
-        lines = ws.receive_json()["lines"]
-    assert [line["text"] for line in lines] == ["hello", "hi there"]
+    with client.websocket_connect("/rpc?token=s3cret") as ws:
+        events = result(ws, "conversation.history")["events"]
+    assert [(e["method"], e["params"]["role"], e["params"]["text"]) for e in events] == [
+        ("conversation.transcript", "user", "hello"),
+        ("conversation.transcript", "assistant", "hi there"),
+    ]
+
+
+def test_history_is_capped_for_the_data_channel(open_server, open_client):
+    from fast_body.web.hub import HISTORY_LIMIT
+
+    for i in range(HISTORY_LIMIT + 10):
+        open_server.hub.echo(f"line {i}")
+    with open_client.websocket_connect("/rpc") as ws:
+        events = result(ws, "conversation.history")["events"]
+    assert len(events) == HISTORY_LIMIT
+    assert events[-1]["params"]["text"] == f"line {HISTORY_LIMIT + 9}"
+
+
+def test_say_reaches_the_conversation_and_every_page(open_server, open_client):
+    with open_client.websocket_connect("/rpc") as ws, open_client.websocket_connect("/rpc") as other:
+        result(other, "conversation.history")  # connected before the line is said
+        assert result(ws, "conversation.say", text="  hello robot ") == {"ok": True}
+        note = other.receive_json()
+    assert note["method"] == "conversation.transcript"
+    assert without_seq(note["params"]) == {"role": "user", "text": "hello robot", "final": True}
+    assert open_server.hub._early == ["hello robot"]  # held until the conversation loop starts
+
+
+def test_say_needs_text(open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        reply, _ = call(ws, "conversation.say", text="  ")
+    assert reply["error"]["data"]["reason"] == "invalid_params"
 
 
 def test_oversized_messages_are_truncated(server, client):
     captured: list[str] = []
     server.hub.submit = captured.append  # type: ignore[method-assign]
-    with client.websocket_connect("/ws?token=s3cret") as ws:
-        ws.receive_json()
-        ws.send_json({"text": "x" * (MAX_MESSAGE_CHARS + 500)})
+    with client.websocket_connect("/rpc?token=s3cret") as ws:
+        result(ws, "conversation.say", text="x" * (MAX_MESSAGE_CHARS + 500))
     assert len(captured[0]) == MAX_MESSAGE_CHARS
+
+
+def test_interrupt_stops_the_robot_and_says_so(open_server, open_client):
+    interrupted = []
+    open_server.hub.request_interrupt = lambda: interrupted.append(True)  # type: ignore[method-assign]
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.interrupt") == {"ok": True}
+        note = ws.receive_json()
+    assert interrupted == [True]
+    assert note == {
+        "jsonrpc": "2.0",
+        "method": "conversation.turn",
+        "params": {"state": "listening", "reason": "interrupted"},
+    }
+
+
+def test_status_says_when_the_brain_is_connected(open_server, open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        before = result(ws, "conversation.status")
+        open_server.bind_brain("the brain", None)
+        after = result(ws, "conversation.status")
+    assert (before["backend_connected"], after["backend_connected"]) == (False, True)
+    assert before["locked"] is False
+    for field in ("ready", "backend_error", "has_hf_connection", "personality", "voice", "listen_mode"):
+        assert field in before
 
 
 # ── hub: crossing between the server and conversation loops ───────────────
@@ -209,6 +319,95 @@ async def test_interrupt_sets_the_event():
     hub.request_interrupt()
     await asyncio.sleep(0)  # the set is scheduled on the loop
     assert hub.interrupt_event.is_set()
+
+
+def test_the_talk_button_drives_the_gate_and_every_page_sees_it(open_server, open_client):
+    from fast_body.listen_gate import PUSH_TO_TALK, ListenGate
+
+    gate = ListenGate(PUSH_TO_TALK)
+    open_server.hub.bind_listen_gate(gate)
+    with open_client.websocket_connect("/rpc") as ws, open_client.websocket_connect("/rpc") as other:
+        # The current gate state, so a late browser shows the right button.
+        first = result(ws, "listen.state")
+        assert first == {"mode": "push_to_talk", "enabled": False, "held": False, "latched": False}
+        result(other, "listen.state")
+
+        assert result(ws, "listen.set", held=True) == {
+            "mode": "push_to_talk",
+            "enabled": True,
+            "held": True,
+            "latched": False,
+        }
+        assert gate.held
+        note = other.receive_json()
+        assert note["method"] == "listen.state" and note["params"]["held"] is True
+
+        assert result(ws, "listen.set", held=False)["enabled"] is False
+        assert result(ws, "listen.set", toggle=True)["latched"] is True
+        assert result(ws, "listen.set", latched=False)["latched"] is False
+
+
+def test_the_mic_maps_onto_the_gate(open_server, open_client):
+    from fast_body.listen_gate import PUSH_TO_TALK, ListenGate
+
+    gate = ListenGate(PUSH_TO_TALK)
+    open_server.hub.bind_listen_gate(gate)
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.mic") == {"muted": True}
+        assert result(ws, "conversation.mic", muted=False) == {"muted": False}
+        assert gate.latched
+        assert result(ws, "conversation.mic", muted=True) == {"muted": True}
+        assert not gate.enabled
+
+
+def test_the_mic_cannot_be_muted_without_push_to_talk(open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "conversation.mic") == {"muted": False}
+        reply, _ = call(ws, "conversation.mic", muted=True)
+    assert reply["error"]["data"]["reason"] == "unsupported"
+
+
+def test_a_tab_closing_mid_hold_releases_it(open_server, open_client):
+    from fast_body.listen_gate import PUSH_TO_TALK, ListenGate
+
+    gate = ListenGate(PUSH_TO_TALK)
+    open_server.hub.bind_listen_gate(gate)
+    with open_client.websocket_connect("/rpc") as ws:
+        result(ws, "listen.set", held=True)
+        assert gate.held
+    assert not gate.held
+
+
+def test_a_tab_closing_leaves_another_tabs_hold_alone(open_server, open_client):
+    from fast_body.listen_gate import PUSH_TO_TALK, ListenGate
+
+    gate = ListenGate(PUSH_TO_TALK)
+    open_server.hub.bind_listen_gate(gate)
+    with open_client.websocket_connect("/rpc") as holder:
+        with open_client.websocket_connect("/rpc") as bystander:
+            result(bystander, "listen.state")
+        result(holder, "listen.set", held=True)
+        assert gate.held
+
+
+def test_without_a_gate_the_button_does_nothing(open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "listen.state") is None
+        assert result(ws, "listen.set", held=True) is None
+        assert result(ws, "conversation.say", text="still works") == {"ok": True}
+
+
+def test_an_antenna_hold_reaches_the_page():
+    from fast_body.listen_gate import PUSH_TO_TALK, ListenGate
+
+    hub = WebChatHub()
+    gate = ListenGate(PUSH_TO_TALK)
+    hub.bind_listen_gate(gate)
+    sent: list[tuple[str, dict]] = []
+    hub.bind_notifier(lambda method, params: sent.append((method, without_seq(params))))
+    gate.set_held(True)  # the antenna loop, not the page
+    assert sent == [("listen.state", {"mode": "push_to_talk", "enabled": True, "held": True, "latched": False})]
+    assert hub.listen_state()["held"] is True
 
 
 async def test_submitting_before_the_conversation_starts_is_held():
@@ -283,7 +482,10 @@ def env_file(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     monkeypatch.setattr(config_module, "ENV_FILE", path)
     for name in config_module.SETTABLE_ENV:
-        monkeypatch.delenv(name, raising=False)
+        # setenv first so monkeypatch restores the original afterwards: the
+        # writer sets os.environ, and a bare delenv of an absent name records nothing.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     return path
 
 
@@ -342,6 +544,27 @@ def test_voice_is_saved_from_the_page(client, env_file):
     )
     assert r.json()["written"] == ["OPENAI_TTS_VOICE"]
     assert "OPENAI_TTS_VOICE=auto" in env_file.read_text()
+
+
+def test_status_reports_the_listen_mode(client, env_file, monkeypatch):
+    listen = client.get("/status?token=s3cret").json()["listen_mode"]
+    assert listen == {"current": "always_on", "available": ["always_on", "push_to_talk"]}
+
+    monkeypatch.setenv("LISTEN_MODE", "push_to_talk")
+    assert client.get("/status?token=s3cret").json()["listen_mode"]["current"] == "push_to_talk"
+
+    monkeypatch.setenv("LISTEN_MODE", "sometimes")  # not a mode: the page is shown the default
+    assert client.get("/status?token=s3cret").json()["listen_mode"]["current"] == "always_on"
+
+
+def test_listen_mode_is_saved_from_the_page(client, env_file):
+    r = client.post(
+        "/settings?token=s3cret",
+        json={"LISTEN_MODE": "push_to_talk"},
+        headers={"origin": "http://testserver"},
+    )
+    assert r.json()["written"] == ["LISTEN_MODE"]
+    assert "LISTEN_MODE=push_to_talk" in env_file.read_text()
 
 
 def test_saving_writes_the_env_file(client, env_file):
@@ -565,7 +788,7 @@ def test_forget_rejects_a_foreign_origin(open_client):
 def test_seed_primes_the_transcript_without_a_client(server):
     """A resumed run has no browser attached yet; the page gets it all on connect."""
     server.hub.seed([{"role": "user", "text": "hello"}, {"role": "robot", "text": "hi"}])
-    assert server.hub.transcript() == [
+    assert [without_seq(e) for e in server.hub.transcript()] == [
         {"role": "user", "text": "hello"},
         {"role": "robot", "text": "hi"},
     ]
@@ -573,22 +796,113 @@ def test_seed_primes_the_transcript_without_a_client(server):
 
 def test_seeded_history_is_replayed_to_a_new_client(server, client):
     server.hub.seed([{"role": "robot", "text": "earlier"}])
-    with client.websocket_connect("/ws?token=s3cret") as ws:
-        assert ws.receive_json()["lines"] == [{"role": "robot", "text": "earlier"}]
+    with client.websocket_connect("/rpc?token=s3cret") as ws:
+        (event,) = result(ws, "conversation.history")["events"]
+    assert without_seq(event["params"]) == {"role": "assistant", "text": "earlier", "final": True}
 
 
 def test_activity_is_broadcast_and_not_kept():
     hub = WebChatHub()
     sent = []
-    hub._broadcast = sent.append  # type: ignore[method-assign]
+    hub.bind_notifier(lambda method, params: sent.append((method, without_seq(params))))
 
     hub.post_activity("thinking")
     hub.post_activity("thinking", step="rolling")
     hub.post_activity("speaking")
+    hub.post_activity("idle")
 
     assert sent == [
-        {"role": "activity", "state": "thinking"},
-        {"role": "activity", "state": "thinking", "step": "rolling"},
-        {"role": "activity", "state": "speaking"},
+        ("conversation.turn", {"state": "thinking"}),
+        ("conversation.activity", {"reason": "tool_call", "step": "rolling"}),
+        ("conversation.turn", {"state": "speaking"}),
+        ("conversation.turn", {"state": "ready"}),
     ]
     assert hub.transcript() == []  # over as soon as the reply lands; a late page is not told
+
+
+def test_a_completed_entry_carries_the_seq_of_its_completion():
+    """So a page that fetched history after the result can drop the result notification."""
+    hub = WebChatHub()
+    sent = []
+    hub.bind_notifier(lambda method, params: sent.append((method, params)))
+    hub._transcript.append({"role": "choice", "id": "c1", "answered": None, "how": None, "seq": 1})
+    hub.post_choice_answered("c1", "study", "page")
+    (entry,) = hub.history()
+    assert entry["params"]["seq"] == sent[-1][1]["seq"]
+    assert (entry["method"], sent[-1][0]) == ("choices.ask", "choices.answered")
+
+
+def test_clearing_tells_every_page():
+    hub = WebChatHub()
+    sent = []
+    hub.bind_notifier(lambda method, params: sent.append(method))
+    hub.echo("forgotten")
+    hub.clear()
+    assert sent == ["conversation.transcript", "conversation.history_cleared"]
+    assert hub.history() == []
+
+
+# ── settings, memory and widgets over /rpc ────────────────────────────────
+def test_personalities_list_in_the_conversation_apps_shape(open_client, env_file):
+    with open_client.websocket_connect("/rpc") as ws:
+        listed = result(ws, "personalities.list")
+    assert listed["current"] == "default"
+    assert "default" in listed["choices"]
+    assert (listed["locked"], listed["locked_to"]) == (False, None)
+
+
+def test_applying_a_personality_saves_it_for_the_next_start(open_client, env_file):
+    with open_client.websocket_connect("/rpc") as ws:
+        applied = result(ws, "personalities.apply", name="default", persist=False)
+        reply, _ = call(ws, "personalities.apply", name="nobody")
+    assert applied["restart_required"] is True
+    assert "FAST_BODY_PERSONALITY=default" in env_file.read_text()
+    assert reply["error"]["data"]["reason"] == "not_found"
+
+
+def test_voices_are_listed_read_and_pinned(open_client, env_file):
+    with open_client.websocket_connect("/rpc") as ws:
+        assert "cedar" in result(ws, "voices.list")
+        assert result(ws, "voices.current")["override"] is False
+        assert result(ws, "voices.apply", voice="marin") == {"voice": "marin", "restart_required": True}
+        assert result(ws, "voices.current") == {"voice": "marin", "override": True}
+    assert "OPENAI_TTS_VOICE=marin" in env_file.read_text()
+
+
+def test_servers_are_listed_while_the_brain_is_down(open_client, monkeypatch):
+    from fast_body import mcp_servers
+
+    monkeypatch.setattr(mcp_servers, "list_servers", lambda: [{"name": "dice", "enabled": True}])
+    with open_client.websocket_connect("/rpc") as ws:
+        listed = result(ws, "servers.list")
+    assert listed["live"] is False
+    assert listed["servers"] == [{"name": "dice", "enabled": True, "attached": None}]
+
+
+def test_memory_is_listed_and_forgotten_over_rpc(open_client, monkeypatch):
+    from fast_body import memory
+
+    monkeypatch.setattr(memory, "list_sessions", lambda: [])
+    monkeypatch.setattr(memory, "delete_session", lambda name: True)
+    monkeypatch.setattr(memory, "live_session_name", lambda: "live")
+    with open_client.websocket_connect("/rpc") as ws:
+        assert result(ws, "memory.list")["sessions"] == []
+        assert result(ws, "memory.forget", name="old")["removed"] == 1
+        reply, _ = call(ws, "memory.forget")
+    assert reply["error"]["code"] == -32602
+
+
+def test_choices_and_widgets_say_when_the_conversation_is_down(open_client):
+    with open_client.websocket_connect("/rpc") as ws:
+        answer, _ = call(ws, "choices.answer", id="c1", option="study")
+        widget, _ = call(ws, "widgets.call", server="dice", name="roll", arguments={})
+        missing, _ = call(ws, "widgets.call", server="dice")
+    assert answer["error"]["data"]["reason"] == "not_running"
+    assert widget["error"]["data"]["reason"] == "not_running"
+    assert missing["error"]["data"]["reason"] == "invalid_params"
+
+
+def test_http_routes_keep_their_status_codes(open_client):
+    r = open_client.post("/apps/call", json={"server": "dice"})
+    assert (r.status_code, r.json()) == (400, {"error": "server, name and an arguments object are required"})
+    assert open_client.post("/apps/choice", json={"id": "c1", "option": "x"}).status_code == 503

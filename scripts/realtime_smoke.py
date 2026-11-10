@@ -10,6 +10,15 @@ server VAD endpointing and the transcript events. What it cannot cover is
 acoustic: the real mic, the room, and the robot hearing its own voice.
 
     OPENAI_API_KEY=… uv run python scripts/realtime_smoke.py [model …]
+    OPENAI_API_KEY=… uv run python scripts/realtime_smoke.py --reconnect
+    OPENAI_API_KEY=… uv run python scripts/realtime_smoke.py --ptt [model]
+    OPENAI_API_KEY=… uv run python scripts/realtime_smoke.py --ptt-silent
+
+`--ptt` runs the push-to-talk session (no turn detection): the gate opens, the
+sentence plays, the gate closes and commits, and the transcript should follow.
+It also says whether the server ran a VAD of its own despite the config, which
+is what decides whether the release has anything left to commit. `--ptt-silent`
+holds the gate open over a second of silence and expects nothing to be sent.
 
 Costs a few cents a run (one TTS call plus a few seconds of transcription).
 """
@@ -55,6 +64,28 @@ class FakeMedia:
     def stop_playing(self) -> None: ...
     def push_audio_sample(self, audio) -> None: ...
     def clear_player(self) -> None: ...
+
+
+class HeldMedia(FakeMedia):
+    """A mic that yields silence until the hold starts, then the utterance.
+
+    The gated pump still reads the mic (and drops the audio), so the utterance
+    has to be withheld until the gate is open or it would be read into the void.
+    """
+
+    def __init__(self, chunks: list[np.ndarray]) -> None:
+        super().__init__(chunks)
+        self.holding = False
+        self.silence = np.zeros((480, 2), dtype=np.float32)
+
+    def get_audio_sample(self):
+        time.sleep(0.03)
+        if not self.holding:
+            return self.silence
+        return self._chunks.pop(0) if self._chunks else self.silence
+
+    def drained(self) -> bool:
+        return not self._chunks
 
 
 class FakeRobot:
@@ -131,6 +162,80 @@ async def run_reconnect(chunks: list[np.ndarray]) -> None:
         await backend.aclose()
 
 
+async def run_ptt(chunks: list[np.ndarray], model: str | None, *, silent: bool) -> None:
+    """Hold the gate open over the utterance (or over silence), release, and see what comes back."""
+    os.environ["VOICE_BACKEND"] = "realtime"
+    os.environ["LISTEN_MODE"] = "push_to_talk"
+    if model:
+        os.environ["REALTIME_PTT_STT_MODEL"] = model
+
+    from fast_body.config import Config
+    from fast_body.voice.realtime_backend import RealtimeVoiceBackend
+
+    seen: list[tuple[float, str]] = []
+
+    class Traced(RealtimeVoiceBackend):
+        async def _consume(self, conn):
+            events = conn.__aiter__()
+
+            class Tee:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    event = await events.__anext__()
+                    seen.append((time.perf_counter(), event.type))
+                    return event
+
+                def __getattr__(self, name):
+                    return getattr(conn, name)
+
+            await super()._consume(Tee())
+
+    held_chunks = [np.zeros((480, 2), dtype=np.float32)] * 33 if silent else list(chunks)
+    media = HeldMedia(held_chunks)
+    backend = Traced(Config(), FakeRobot(media))
+    print(f"  model {Config().realtime_ptt_stt_model}, {'a second of silence' if silent else 'the sentence'}")
+    started = time.perf_counter()
+    try:
+        heard = asyncio.ensure_future(backend.listen())
+        for _ in range(300):  # the session has to be up before the hold means anything
+            if backend._session_confirmed:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise RuntimeError("no session.updated within 15 s")
+        print(f"  session open after {time.perf_counter() - started:.1f}s; opening the gate")
+
+        await backend.on_listen_open(continuous=True)
+        media.holding = True
+        while not media.drained():
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.3)  # the last pump batch
+        print(
+            f"  hold: {backend._ptt_ms_since_open:.0f} ms pumped, "
+            f"local VAD heard speech: {backend._ptt_speech_since_open}, "
+            f"server ended the turn itself: {backend._ptt_server_turn_since_open}"
+        )
+        released = time.perf_counter()
+        await backend.on_listen_close(commit=True)
+
+        try:
+            text = await asyncio.wait_for(heard, timeout=8.0 if silent else 30.0)
+        except TimeoutError:
+            heard.cancel()
+            text = None
+        if text is None:
+            print(
+                "  no transcript" + (" (correct: nothing was said)" if silent else " — the release committed nothing?")
+            )
+        else:
+            print(f"  transcript {time.perf_counter() - released:.1f}s after release: {text!r}")
+    finally:
+        await backend.aclose()
+    report_events(seen, started)
+
+
 async def run_one(model: str, chunks: list[np.ndarray]) -> None:
     os.environ["VOICE_BACKEND"] = "realtime"
     os.environ["REALTIME_STT_MODEL"] = model
@@ -192,6 +297,10 @@ async def main() -> None:
 
     if "--reconnect" in sys.argv:
         await run_reconnect(chunks)
+        return
+    if "--ptt" in sys.argv or "--ptt-silent" in sys.argv:
+        rest = [a for a in sys.argv[1:] if not a.startswith("--")]
+        await run_ptt(chunks, rest[0] if rest else None, silent="--ptt-silent" in sys.argv)
         return
 
     for model in sys.argv[1:] or MODELS:

@@ -16,6 +16,7 @@ reasons; those run on the MovementManager thread, so motion and speech overlap.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
@@ -38,7 +39,10 @@ from fast_body.embodiment import cues
 from fast_body.embodiment.context import RobotContext
 from fast_body.embodiment.gaze import GazeController
 from fast_body.embodiment.moves import MovementManager
+from fast_body.listen_gate import ALWAYS_ON, PUSH_TO_TALK, ListenGate
+from fast_body.physical_trigger import AntennaHoldDetector
 from fast_body.turn_speech import TurnSpeech, text_blocks
+from fast_body.voice.base import supports_push_to_talk
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,9 @@ _CANCEL_GRACE_S = 5.0
 # The daemon force-kills an app 20 s after SIGINT. Exit hard before that if a
 # clean shutdown has not finished, so the daemon never has to.
 _SHUTDOWN_DEADLINE_S = 15.0
+# How often the antenna hold loop reads the joints. The detector needs three
+# consecutive over-threshold reads, so this is also a 100 ms debounce.
+_PTT_ANTENNA_POLL_HZ = 30.0
 
 
 def _installed_versions() -> str:
@@ -169,6 +176,9 @@ class FastBodyCore:
         self._turn_speech: TurnSpeech | None = None
         self._mcp_retry: asyncio.Task | None = None
         self._wobbling = False
+        # Push-to-talk: built in _start_body from the config as finally loaded.
+        self.listen_gate: ListenGate | None = None
+        self._antenna_task: asyncio.Task | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def _prepare_robot(self) -> None:
@@ -426,6 +436,7 @@ class FastBodyCore:
                 await self.voice.start(self.stop_event)
         if hasattr(self.voice, "on_speech_start"):
             self.voice.on_speech_start(lambda: self._cue(cues.LISTENING))
+        self._bind_listen_gate(web_hub)
         self._turn_speech = self._build_turn_speech()
         warm_up = self._start_tts_warm_up()
 
@@ -449,13 +460,116 @@ class FastBodyCore:
             )
         )
         logger.info(
-            "fast-body ready (voice=%s, wobble=%s, barge_in=%s; %s)",
+            "fast-body ready (voice=%s, listen=%s, wobble=%s, barge_in=%s; %s)",
             self.config.voice_backend,
+            self.listen_gate.mode if self.listen_gate is not None else ALWAYS_ON,
             self._wobbling,
             self.config.enable_barge_in,
             _installed_versions(),
         )
         return warm_up
+
+    # ── push-to-talk ─────────────────────────────────────────────────────
+    def _bind_listen_gate(self, web_hub: Any) -> None:
+        """Build the gate for the configured mode and hook it to the voice, the page and the antennas."""
+        gate = ListenGate(self.config.listen_mode)
+        if gate.mode == PUSH_TO_TALK and not supports_push_to_talk(self.voice):
+            logger.warning(
+                "LISTEN_MODE=push_to_talk needs VOICE_BACKEND=realtime; the %s backend endpoints "
+                "on its own, so listening stays always on",
+                self.config.voice_backend,
+            )
+            gate.set_mode(ALWAYS_ON)
+        self.listen_gate = gate
+        gate.bind(asyncio.get_running_loop(), lambda: self.voice)
+        if web_hub is not None and hasattr(web_hub, "bind_listen_gate"):
+            web_hub.bind_listen_gate(gate)
+        if gate.mode == PUSH_TO_TALK and self.config.ptt_antenna:
+            self._antenna_task = asyncio.create_task(self._antenna_hold_loop(), name="ptt-antenna")
+
+    def _hold_on(self) -> bool:
+        """True while push-to-talk has the mic open: antenna cues are held back then.
+
+        A cue is a queued antenna move, which counts as an active move and
+        would pause the hold detector, and the listening cue at the gate
+        opening would release the very hold that opened it. The body still
+        freezes its breathing; the pose it holds is the cue.
+        """
+        gate = getattr(self, "listen_gate", None)  # tests build cores without __init__
+        return gate is not None and gate.mode == PUSH_TO_TALK and gate.enabled
+
+    def _antenna_residual(self) -> tuple[list[float], tuple[float, float], list[float]]:
+        """(measured, commanded, measured minus commanded) antenna positions in rad."""
+        _, measured = self.robot.get_current_joint_positions()
+        present = [float(measured[0]), float(measured[1])]
+        commanded = self.movement.commanded_antennas()
+        return present, commanded, [p - c for p, c in zip(present, commanded)]
+
+    async def _antenna_hold_loop(self) -> None:
+        """Hold-to-talk by antenna: deflect one to open the mic, let go to send.
+
+        Detection runs on the residual between measured and commanded
+        positions, so breathing and the cues cancel out, and pauses while an
+        emotion, dance or look plays: the servos lag those by up to 0.4 rad
+        (measured on the conversation app, 2026-10-24), which would read as a
+        hand. Each transition logs the raw positions beside the residual,
+        because two holds fired there with nobody at the robot, both antennas
+        symmetric at about 0.3 rad for under a second.
+        """
+        gate = self.listen_gate
+        assert gate is not None
+        detector = AntennaHoldDetector(
+            press_delta_rad=self.config.ptt_antenna_press_rad,
+            release_delta_rad=self.config.ptt_antenna_release_rad,
+        )
+        poll_dt = 1.0 / _PTT_ANTENNA_POLL_HZ
+        prev_held = False
+        peak = 0.0  # largest residual seen since the last report
+        next_report = time.monotonic() + 2.0
+        logger.info(
+            "antenna hold-to-talk on (press >= %.2f rad, release <= %.2f rad)",
+            self.config.ptt_antenna_press_rad,
+            self.config.ptt_antenna_release_rad,
+        )
+        while not self.stop_event.is_set():
+            try:
+                if gate.mode != PUSH_TO_TALK or self.movement.move_active():
+                    detector.reset()
+                    if prev_held:
+                        gate.set_held(False)
+                        prev_held = False
+                    await asyncio.sleep(poll_dt if gate.mode == PUSH_TO_TALK else 0.5)
+                    continue
+                measured, commanded, residual = self._antenna_residual()  # the SDK client caches joint state
+                held = detector.update(residual)
+                peak = max([peak, *(abs(r) for r in residual)])
+                if held != prev_held:
+                    logger.info(
+                        "antenna hold %s (residual %s, measured %s, commanded %s rad)",
+                        "started" if held else "released",
+                        [round(r, 3) for r in residual],
+                        [round(m, 3) for m in measured],
+                        [round(c, 3) for c in commanded],
+                    )
+                    gate.set_held(held)
+                    prev_held = held
+                now = time.monotonic()
+                if now >= next_report:
+                    logger.debug("antenna peak residual %.3f rad over 2 s", peak)
+                    peak, next_report = 0.0, now + 2.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("antenna hold loop: %s", e)
+            await asyncio.sleep(poll_dt)
+
+    async def _stop_antenna_loop(self) -> None:
+        task, self._antenna_task = self._antenna_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
     async def _attach_brain(self, brain: Any) -> memory.Resume:
         """Memory, context budget, MCP servers, skills and the page hooks, once the brain is open."""
@@ -764,6 +878,8 @@ class FastBodyCore:
     def _tool_tick(self) -> None:
         """A flick of the antennas per tool call: the turn is working, not stuck."""
         self._tool_calls += 1
+        if self._hold_on():
+            return
         try:
             head, antennas = self.movement.current_pose()
             for move in cues.tool_tick(self._tool_calls, head, antennas):
@@ -794,7 +910,7 @@ class FastBodyCore:
                 ctx.hold_expression = False  # each turn starts with a clean face
             hold = bool(ctx.hold_expression) if ctx is not None else False
             move = cues.antenna_cue(state, head, antennas, hold_expression=hold)
-            if move is not None:
+            if move is not None and not self._hold_on():
                 self.movement.queue_move(move)
         except Exception as e:
             logger.debug("cue %s failed: %s", state, e)
@@ -802,6 +918,7 @@ class FastBodyCore:
     async def _shutdown(self) -> None:
         logger.info("shutting down…")
         steps: list[tuple[str, Callable[[], Any] | None]] = [
+            ("antenna hold loop stop", self._stop_antenna_loop),
             ("disable wobble", self.robot.disable_wobbling if self._wobbling else None),
             ("voice close", self.voice.aclose if self.voice is not None else None),
             ("web chat stop", self.web.stop if self.web is not None else None),

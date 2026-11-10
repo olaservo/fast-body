@@ -10,7 +10,7 @@ from fast_body.personality import (
     list_personalities,
     load_personality,
 )
-from fast_body.prompts import EMBODIMENT_INSTRUCTION, SKILLS_PLACEHOLDER, compose_instruction
+from fast_body.prompts import EMBODIMENT_INSTRUCTION, PUSH_TO_TALK_INSTRUCTION, SKILLS_PLACEHOLDER, compose_instruction
 
 
 # ── packaged cards ────────────────────────────────────────────────────────
@@ -99,6 +99,12 @@ def test_compose_puts_persona_first_then_guide_then_skills():
     assert EMBODIMENT_INSTRUCTION in text
     # fast-agent fills this with the installed skills, or with nothing.
     assert text.endswith(SKILLS_PLACEHOLDER)
+
+
+def test_compose_tells_the_brain_about_push_to_talk_only_when_on():
+    assert PUSH_TO_TALK_INSTRUCTION not in compose_instruction("Persona.")
+    text = compose_instruction("Persona.", push_to_talk=True)
+    assert text.index(EMBODIMENT_INSTRUCTION) < text.index(PUSH_TO_TALK_INSTRUCTION) < text.index(SKILLS_PLACEHOLDER)
 
 
 def test_compose_with_empty_persona_is_the_guide_and_the_skills():

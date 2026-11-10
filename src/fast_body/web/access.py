@@ -74,5 +74,31 @@ def not_found() -> PlainTextResponse:
     return PlainTextResponse("Not found", status_code=404)
 
 
-def not_running() -> JSONResponse:
-    return JSONResponse({"error": "the conversation is not running"}, status_code=503)
+class RequestError(Exception):
+    """A request a handler refuses. Routes answer with `status`; `/rpc` with `reason`."""
+
+    REASONS = {
+        400: "invalid_params",
+        403: "forbidden",
+        404: "not_found",
+        409: "conflict",
+        502: "upstream_failed",
+        503: "not_running",
+        504: "timeout",
+    }
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+    @property
+    def reason(self) -> str:
+        return self.REASONS.get(self.status, "internal_error")
+
+    @classmethod
+    def not_running(cls) -> RequestError:
+        return cls(503, "the conversation is not running")
+
+    def response(self) -> JSONResponse:
+        return JSONResponse({"error": self.message}, status_code=self.status)

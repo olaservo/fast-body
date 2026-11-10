@@ -1,4 +1,4 @@
-"""HTTP + WebSocket server for the companion page.
+"""HTTP server for the companion page, and the `/rpc` socket everything talks over.
 
 We run our own uvicorn rather than the one `ReachyMiniApp` starts for
 `custom_app_url`, so the page works the same from the CLI as under the daemon.
@@ -8,23 +8,26 @@ port.
 Access control and the reasoning behind it are in the README's Companion page
 section: an optional password, asked for once per browser and then kept in a
 cookie, so the dashboard's open button (a plain URL) keeps working. There is no
-TLS.
+TLS. Who may open `/rpc` is in web/rpc.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import logging
 import os
 import secrets
 import threading
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 
-from starlette.applications import Starlette
+from fastapi import FastAPI
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Route
 
 from fast_body import memory
 from fast_body.config import (
@@ -36,11 +39,13 @@ from fast_body.config import (
     forget_env,
     persist_env,
 )
+from fast_body.listen_gate import LISTEN_MODES
 from fast_body.personality import list_personalities
-from fast_body.web import app_routes, settings_routes
+from fast_body.web import app_routes, rpc, settings_routes
 from fast_body.web.access import (
     MAX_MESSAGE_CHARS,
     MIN_TOKEN_CHARS,
+    RequestError,
     end_session,
     local_path,
     not_found,
@@ -59,9 +64,6 @@ _STATIC = PACKAGE_DIR / "static"
 _PAGE = _STATIC / "index.html"
 _SETTINGS_PAGE = _STATIC / "settings.html"
 _LOGIN_PAGE = _STATIC / "login.html"
-
-# Starlette's code for "policy violation".
-_WS_POLICY_VIOLATION = 1008
 
 
 def _lan_address() -> str:
@@ -83,7 +85,7 @@ def _lan_address() -> str:
 
 
 class WebChatServer:
-    """Serves the page and the socket the page talks over."""
+    """Serves the pages and the `/rpc` socket."""
 
     def __init__(self, hub: WebChatHub, *, host: str, port: int, token: str | None = None) -> None:
         self.hub = hub
@@ -108,8 +110,14 @@ class WebChatServer:
         self._brain: Any = None
         self._brain_loop: Any = None
 
+        self.rpc = rpc.build(self)
+        hub.bind_notifier(self.rpc.broadcast_threadsafe)
+
     def bind_brain(self, brain: Any, loop: Any) -> None:
         self._brain, self._brain_loop = brain, loop
+
+    def brain_bound(self) -> bool:
+        return self._brain is not None
 
     def unbind_brain(self) -> None:
         self._brain = self._brain_loop = None
@@ -148,6 +156,28 @@ class WebChatServer:
         if not isinstance(body, dict):
             return None, JSONResponse({"error": "expected an object"}, status_code=400)
         return body, None
+
+    async def _answer(self, op: Callable[[dict[str, Any]], Any], params: dict[str, Any]) -> Any:
+        try:
+            result = op(params)
+            if inspect.isawaitable(result):
+                result = await result
+        except RequestError as p:
+            return p.response()
+        return JSONResponse(result)
+
+    async def http_get(self, op: Callable[[dict[str, Any]], Any], request: Any) -> Any:
+        """A read: the token, then the operation on the query string."""
+        if not token_ok(request, self.token):
+            return not_found()
+        return await self._answer(op, dict(request.query_params))
+
+    async def http_post(self, op: Callable[[dict[str, Any]], Any], request: Any) -> Any:
+        """A change: the guarded JSON body, then the operation on it."""
+        body, error = await self._json_body(request)
+        if body is None:
+            return error
+        return await self._answer(op, body)
 
     # ── routes ───────────────────────────────────────────────────────────
     def _serve(self, path: Any) -> Any:
@@ -264,6 +294,10 @@ class WebChatServer:
                     "current": "on" if cfg.enable_memory else "off",
                     "available": ["on", "off"],
                 },
+                "listen_mode": {
+                    "current": cfg.listen_mode if cfg.listen_mode in LISTEN_MODES else LISTEN_MODES[0],
+                    "available": list(LISTEN_MODES),
+                },
             }
         )
 
@@ -276,33 +310,26 @@ class WebChatServer:
         errors = Config().validate()
         return JSONResponse({"written": written, "keys": env_status(), "errors": errors})
 
-    async def _memory(self, request: Any) -> Any:
+    def memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """What the robot has written down. Metadata only, never the transcript."""
-        if not token_ok(request, self.token):
-            return not_found()
         cfg = Config()
-        return JSONResponse(
-            {
-                "enabled": cfg.enable_memory,
-                "directory": str(MEMORY_DIR),
-                "resume_hours": cfg.memory_resume_h,
-                "sessions": memory.list_sessions(),
-            }
-        )
+        return {
+            "enabled": cfg.enable_memory,
+            "directory": str(MEMORY_DIR),
+            "resume_hours": cfg.memory_resume_h,
+            "sessions": memory.list_sessions(),
+        }
 
-    async def _forget(self, request: Any) -> Any:
+    async def memory_forget(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delete one saved conversation, or all of them."""
-        body, error = await self._json_body(request)
-        if body is None:
-            return error
         live = memory.live_session_name()
-        if body.get("all") is True:
+        if params.get("all") is True:
             removed = memory.forget_all()
             forgetting_live = True
         else:
-            name = str(body.get("name", "")).strip()
+            name = str(params.get("name", "")).strip()
             if not name:
-                return JSONResponse({"error": "name or all is required"}, status_code=400)
+                raise RequestError(400, "name or all is required")
             removed = 1 if memory.delete_session(name) else 0
             forgetting_live = name == live
         # The file is gone; the brain still holds the conversation until told.
@@ -316,34 +343,13 @@ class WebChatServer:
             # The page would otherwise keep showing a conversation the robot
             # no longer has.
             self.hub.clear()
-        return JSONResponse({"removed": removed, "cleared": cleared, "sessions": memory.list_sessions()})
+        return {"removed": removed, "cleared": cleared, "sessions": memory.list_sessions()}
 
-    async def _socket(self, websocket: Any) -> None:
-        if not token_ok(websocket, self.token) or not origin_ok(websocket.headers):
-            await websocket.close(code=_WS_POLICY_VIOLATION)
-            return
-
-        self.hub.bind_server_loop()
-        await websocket.accept()
-        self.hub.add_client(websocket)
-        try:
-            await websocket.send_json({"role": "history", "lines": self.hub.transcript()})
-            while True:
-                data = await websocket.receive_json()
-                if not isinstance(data, dict):
-                    continue
-                if data.get("type") == "interrupt":
-                    self.hub.request_interrupt()
-                    continue
-                text = str(data.get("text", ""))[:MAX_MESSAGE_CHARS]
-                self.hub.submit(text)
-        except Exception:
-            pass  # client went away, or sent something unparseable
-        finally:
-            self.hub.discard_client(websocket)
-
-    def _build_app(self) -> Starlette:
-        return Starlette(
+    def _build_app(self) -> FastAPI:
+        app = FastAPI(
+            openapi_url=None,
+            docs_url=None,
+            redoc_url=None,
             routes=[
                 Route("/", self._page),
                 Route("/settings", self._settings_page),
@@ -352,13 +358,15 @@ class WebChatServer:
                 Route("/logout", self._logout, methods=["POST"]),
                 Route("/lock", self._lock, methods=["POST"]),
                 Route("/status", self._status),
-                Route("/memory", self._memory),
-                Route("/memory/forget", self._forget, methods=["POST"]),
+                Route("/memory", partial(self.http_get, self.memory_list)),
+                Route("/memory/forget", partial(self.http_post, self.memory_forget), methods=["POST"]),
                 *settings_routes.routes(self),
                 *app_routes.routes(self),
-                WebSocketRoute("/ws", self._socket),
-            ]
+            ],
         )
+        self.rpc.mount(app, rpc.RPC_PATH)
+        app.add_middleware(rpc.RpcGate, server=self)
+        return app
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self) -> None:

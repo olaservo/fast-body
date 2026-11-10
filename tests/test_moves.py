@@ -84,3 +84,51 @@ def test_current_pose_falls_back_when_robot_unreadable():
     head, antennas = mgr.current_pose()  # should not raise
     assert head.shape == (4, 4)
     assert antennas == (0.0, 0.0)
+
+
+# ── what the control thread publishes for other threads ───────────────────
+def test_commanded_antennas_follow_the_pose_just_sent(fake_robot):
+    mgr = _mgr(fake_robot)
+    head, ant = mgr.current_pose()
+    mgr.queue_move(AntennaMove("curious", head, ant, duration=1.0))
+    mgr._step(now=0.0)
+    mgr._step(now=0.999)  # the move has all but reached its target
+    left, right = mgr.commanded_antennas()
+    sent = fake_robot.set_target_calls[-1]["antennas"]
+    assert (left, right) == (sent[0], sent[1])
+    assert abs(left - 0.8727) < 1e-3  # 50 degrees
+
+
+def test_move_active_excludes_breathing(fake_robot):
+    mgr = _mgr(fake_robot)
+    mgr.state.last_activity_time = -10.0
+    mgr._step(now=0.0)  # idle long enough: a breath is queued...
+    mgr._step(now=0.01)  # ...and starts
+    assert isinstance(mgr.state.current_move, BreathingMove)
+    assert mgr.move_active() is False
+
+    head, ant = mgr.current_pose()
+    mgr.queue_move(AntennaMove("curious", head, ant, duration=0.6))
+    mgr._step(now=0.01)
+    assert mgr.move_active() is True
+
+    mgr._step(now=0.7)  # the cue is over
+    assert mgr.move_active() is False
+
+
+def test_listening_ends_a_running_breath_and_holds_the_antennas(fake_robot):
+    mgr = _mgr(fake_robot)
+    mgr.state.last_activity_time = -10.0
+    mgr._step(now=0.0)
+    mgr._step(now=0.01)  # the breath starts
+    mgr._step(now=1.51)  # past the blend, at the peak of the sway
+    assert isinstance(mgr.state.current_move, BreathingMove)
+    before = mgr.commanded_antennas()
+    assert before != (0.0, 0.0)
+
+    mgr.set_listening(True)
+    mgr._step(now=1.52)
+    assert mgr.state.current_move is None
+    assert mgr.commanded_antennas() == before  # frozen where the sway left them
+    mgr._step(now=5.0)
+    assert mgr.commanded_antennas() == before  # and no new breath while listening

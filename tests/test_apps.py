@@ -190,10 +190,9 @@ async def test_every_tool_call_is_a_step_on_the_activity_line():
 
     # The card named one tool; the other is a step with no name. Neither
     # message carries the arguments.
-    assert [m for m in sent if m["role"] == "activity"] == [
-        {"role": "activity", "state": "thinking", "step": "rolling"},
-        {"role": "activity", "state": "thinking", "step": ""},
-    ]
+    steps = [m for m in sent if m["role"] == "activity"]
+    assert [(m["state"], m["step"]) for m in steps] == [("thinking", "rolling"), ("thinking", "")]
+    assert {k for m in steps for k in m} == {"role", "state", "step", "seq"}
     assert len(ticks) == 2
 
 
@@ -355,10 +354,11 @@ def test_widgets_are_replayed_finished_to_a_new_client(server, client):
     hub = server.hub
     hub.post_app_call("app-1", widget=apps.Widget(SERVER, "roll_d100", D100), arguments={"skill": 45})
     hub.post_app_result("app-1", {"content": [], "structuredContent": {"roll": 7}})
-    with client.websocket_connect("/ws?token=s3cret") as ws:
-        (entry,) = ws.receive_json()["lines"]
-    assert entry["role"] == "app"
-    assert entry["result"]["structuredContent"] == {"roll": 7}
+    with client.websocket_connect("/rpc?token=s3cret") as ws:
+        ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "conversation.history"})
+        (event,) = ws.receive_json()["result"]["events"]
+    assert event["method"] == "widgets.call"
+    assert event["params"]["result"]["structuredContent"] == {"roll": 7}
 
 
 def test_forget_all_clears_the_page(server, client, monkeypatch):

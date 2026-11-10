@@ -8,11 +8,15 @@ The web server runs uvicorn on its own thread and loop; the conversation runs on
 the app's loop. Each direction crosses that boundary once:
 
 - browser → conversation: `call_soon_threadsafe` onto the conversation loop's queue.
-- conversation → browser: `run_coroutine_threadsafe` onto the server loop, without
-  waiting for delivery, so a dead socket can't stall a turn.
+- conversation → browser: a JSON-RPC notification, handed to the `/rpc` server's
+  `broadcast_threadsafe`, which schedules it on the server loop without waiting
+  for delivery, so a dead socket can't stall a turn.
 
-Recent lines are buffered and replayed to a browser that connects or reloads
-mid-conversation. Besides spoken lines the transcript carries widgets: a tool
+Entries are kept here as `{"role": …}` dicts and turned into notifications by
+`event_for` on the way out. Recent ones are buffered and returned by
+`conversation.history` to a client that connects or reloads mid-conversation.
+Every entry and notification carries a `seq`, so a client can drop the
+notifications that history already covered. Besides spoken lines the transcript carries widgets: a tool
 call whose server paired it with an MCP App page (see web/apps.py) is one
 entry, posted when the call starts and completed in place when the result
 lands, so a late browser gets the finished widget.
@@ -21,8 +25,10 @@ lands, so a late browser gets the finished widget.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -30,6 +36,13 @@ logger = logging.getLogger(__name__)
 # Lines replayed to a browser that connects late. Enough to see the thread of the
 # conversation, small enough to send in one frame.
 _TRANSCRIPT_LIMIT = 200
+
+# Entries `conversation.history` returns. The daemon relays a reply over the
+# WebRTC data channel, so keep it to a few frames.
+HISTORY_LIMIT = 60
+
+# fast-body's cue states, in the conversation app's turn vocabulary.
+_TURN_STATES = {"idle": "ready", "listening": "listening", "thinking": "thinking", "speaking": "speaking"}
 
 # The robot answers one message per turn, so a backlog past this is someone
 # holding down Enter. Bounded to keep the queue from growing without limit.
@@ -47,10 +60,16 @@ class WebChatHub:
         self._early: list[str] = []
         self._transcript: deque[dict[str, Any]] = deque(maxlen=_TRANSCRIPT_LIMIT)
 
-        # Bound when each side starts; both are read from the other's thread.
+        # Bound when the conversation starts; read from the server's thread.
         self._app_loop: asyncio.AbstractEventLoop | None = None
-        self._server_loop: asyncio.AbstractEventLoop | None = None
-        self._clients: set[Any] = set()
+        # The `/rpc` server's broadcast_threadsafe, bound by the web server.
+        self._notify: Callable[[str, dict[str, Any]], None] | None = None
+        self._seq = itertools.count(1)
+
+        # Push-to-talk: the gate the page's Talk button drives, and its last
+        # state, replayed to a browser that connects mid-hold.
+        self._listen_gate: Any = None
+        self._listen: dict[str, Any] | None = None
 
     # ── conversation-loop side (the VoiceBackend interface) ──────────────
     async def start(self, stop_event: Any = None) -> None:
@@ -84,6 +103,7 @@ class WebChatHub:
             "result": None,
             "cancelled": False,
             "failed": False,
+            "seq": next(self._seq),
         }
         self._transcript.append(message)
         self._broadcast(message)
@@ -92,9 +112,17 @@ class WebChatHub:
         self, call_id: str, result: dict[str, Any] | None, *, cancelled: bool = False, failed: bool = False
     ) -> None:
         """The call finished (or was cut short, or came back an error); completes the entry in place."""
-        self._complete("app", call_id, result=result, cancelled=cancelled, failed=failed)
+        seq = next(self._seq)
+        self._complete("app", call_id, result=result, cancelled=cancelled, failed=failed, seq=seq)
         self._broadcast(
-            {"role": "app-result", "id": call_id, "result": result, "cancelled": cancelled, "failed": failed}
+            {
+                "role": "app-result",
+                "id": call_id,
+                "result": result,
+                "cancelled": cancelled,
+                "failed": failed,
+                "seq": seq,
+            }
         )
 
     def post_activity(self, state: str, step: str | None = None) -> None:
@@ -104,7 +132,7 @@ class WebChatHub:
         marks one tool call — the label the card allows for it, or "" for an
         unnamed one; None means the state changed with no call attached.
         """
-        message: dict[str, Any] = {"role": "activity", "state": state}
+        message: dict[str, Any] = {"role": "activity", "state": state, "seq": next(self._seq)}
         if step is not None:
             message["step"] = step
         self._broadcast(message)
@@ -119,14 +147,16 @@ class WebChatHub:
             "allow_free_text": choice.allow_free_text,
             "answered": None,
             "how": None,
+            "seq": next(self._seq),
         }
         self._transcript.append(message)
         self._broadcast(message)
 
     def post_choice_answered(self, choice_id: str, option_id: str | None, how: str) -> None:
         """The question was answered (or ran out); every page's buttons settle."""
-        self._complete("choice", choice_id, answered=option_id, how=how)
-        self._broadcast({"role": "choice-answered", "id": choice_id, "answered": option_id, "how": how})
+        seq = next(self._seq)
+        self._complete("choice", choice_id, answered=option_id, how=how, seq=seq)
+        self._broadcast({"role": "choice-answered", "id": choice_id, "answered": option_id, "how": how, "seq": seq})
 
     def requeue(self, text: str) -> None:
         """Hand words already shown on the page back to the conversation as its next turn."""
@@ -139,15 +169,15 @@ class WebChatHub:
     def clear(self) -> None:
         """Drop the transcript, here and on every open page — the conversation was forgotten."""
         self._transcript.clear()
-        self._broadcast({"role": "history", "lines": []})
+        self._broadcast({"role": "cleared", "seq": next(self._seq)})
 
     async def aclose(self) -> None:
-        self._clients.clear()
+        self._notify = None
 
     # ── web-server side ──────────────────────────────────────────────────
-    def bind_server_loop(self) -> None:
-        """Adopt the running loop as the server's; called from a route handler."""
-        self._server_loop = asyncio.get_running_loop()
+    def bind_notifier(self, notify: Callable[[str, dict[str, Any]], None] | None) -> None:
+        """Send every notification through `notify(method, params)`: the `/rpc` server's broadcast."""
+        self._notify = notify
 
     def seed(self, lines: list[dict[str, str]]) -> None:
         """Prime the transcript with a conversation resumed from an earlier run.
@@ -159,14 +189,13 @@ class WebChatHub:
             self._post(line["role"], line["text"], broadcast=False)
 
     def transcript(self) -> list[dict[str, Any]]:
-        """The recent conversation, for replay into a newly opened browser."""
+        """The recent conversation, as the hub keeps it."""
         return list(self._transcript)
 
-    def add_client(self, websocket: Any) -> None:
-        self._clients.add(websocket)
-
-    def discard_client(self, websocket: Any) -> None:
-        self._clients.discard(websocket)
+    def history(self, limit: int = HISTORY_LIMIT) -> list[dict[str, Any]]:
+        """The last `limit` entries as the notifications that carried them, finished widgets included."""
+        entries = list(self._transcript)[-limit:] if limit > 0 else []
+        return [{"method": method, "params": params} for method, params in map(event_for, entries)]
 
     def submit(self, text: str) -> None:
         """Hand a browser message to the conversation loop. Called on the server loop."""
@@ -199,6 +228,34 @@ class WebChatHub:
         if loop is not None:
             loop.call_soon_threadsafe(self.interrupt_event.set)
 
+    # ── push-to-talk ─────────────────────────────────────────────────────
+    def bind_listen_gate(self, gate: Any) -> None:
+        """Adopt the app's listen gate: the page drives it, and every change reaches every page."""
+        self._listen_gate = gate
+        gate.set_change_listener(self.post_listen)
+        self._listen = dict(gate.snapshot())
+
+    def post_listen(self, snapshot: dict[str, Any]) -> None:
+        """The gate changed (a hand on an antenna, or another tab): every page mirrors it."""
+        self._listen = dict(snapshot)
+        self._broadcast({"role": "listen", **snapshot, "seq": next(self._seq)})
+
+    def listen_state(self) -> dict[str, Any] | None:
+        """What the Talk button should show right now; None when there is no gate."""
+        return dict(self._listen) if self._listen is not None else None
+
+    def set_listen(self, *, held: bool | None = None, latched: bool | None = None, toggle: bool = False) -> None:
+        """The page's Talk button: hold, release, latch or toggle. Any thread; the gate is thread-safe."""
+        gate = self._listen_gate
+        if gate is None:
+            return
+        if held is not None:
+            gate.set_held(bool(held))
+        if latched is not None:
+            gate.set_latched(bool(latched))
+        if toggle:
+            gate.toggle()
+
     # ── internals ────────────────────────────────────────────────────────
     def _complete(self, role: str, entry_id: str, **fields: Any) -> None:
         """Update the latest transcript entry with this role and id."""
@@ -208,25 +265,50 @@ class WebChatHub:
                 break
 
     def _post(self, role: str, text: str, broadcast: bool = True) -> None:
-        message = {"role": role, "text": text}
+        message = {"role": role, "text": text, "seq": next(self._seq)}
         self._transcript.append(message)
         if broadcast:
             self._broadcast(message)
 
     def _broadcast(self, message: dict[str, Any]) -> None:
-        """Fan a message out to open sockets without blocking the caller."""
-        loop = self._server_loop
-        if loop is None or not self._clients:
+        """Send an entry to every `/rpc` peer as a notification, without blocking the caller."""
+        notify = self._notify
+        if notify is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._send_all(message), loop)
+            notify(*event_for(message))
         except RuntimeError:  # server loop already closing
-            logger.debug("web chat broadcast skipped — server loop is gone")
+            logger.debug("notification skipped — server loop is gone")
 
-    async def _send_all(self, message: dict[str, str]) -> None:
-        for websocket in list(self._clients):
-            try:
-                await websocket.send_json(message)
-            except Exception:
-                # A browser tab that went away is ordinary, not an error.
-                self._clients.discard(websocket)
+
+def event_for(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The JSON-RPC notification (method, params) that carries a hub entry."""
+    role = message.get("role")
+    seq = message.get("seq")
+    if role in ("user", "robot"):
+        text = message.get("text", "")
+        return "conversation.transcript", {
+            "role": "user" if role == "user" else "assistant",
+            "text": text,
+            "final": True,
+            "seq": seq,
+        }
+    if role == "activity":
+        if "step" in message:
+            return "conversation.activity", {"reason": "tool_call", "step": message["step"], "seq": seq}
+        state = str(message.get("state"))
+        return "conversation.turn", {"state": _TURN_STATES.get(state, state), "seq": seq}
+    method = _ENTRY_METHODS.get(str(role))
+    if method is None:
+        raise ValueError(f"no notification for a {role!r} entry")
+    return method, {k: v for k, v in message.items() if k != "role"}
+
+
+_ENTRY_METHODS = {
+    "app": "widgets.call",
+    "app-result": "widgets.result",
+    "choice": "choices.ask",
+    "choice-answered": "choices.answered",
+    "listen": "listen.state",
+    "cleared": "conversation.history_cleared",
+}

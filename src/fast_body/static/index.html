@@ -161,6 +161,9 @@
   }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: 0.5; }
+  /* Push-to-talk: hold to talk, tap to latch. Shown only in that mode. */
+  #talk { touch-action: none; user-select: none; -webkit-user-select: none; min-width: 11ch; }
+  #talk.open { background: var(--user); color: var(--ground); border-color: var(--user); }
 </style>
 </head>
 <body>
@@ -179,6 +182,8 @@
     <input id="msg" placeholder="Say something to the robot…" autocomplete="off"
            maxlength="2000" aria-label="Message" disabled />
     <button id="send" disabled>Send</button>
+    <button id="talk" title="Hold to talk and let go to send, or tap to keep listening until the next tap"
+            aria-pressed="false" hidden disabled>Hold to talk</button>
     <button id="stop" title="Stop the robot mid-reply" disabled>Stop</button>
   </footer>
 
@@ -190,6 +195,7 @@
   var status = document.getElementById("status");
   var msg = document.getElementById("msg");
   var send = document.getElementById("send");
+  var talk = document.getElementById("talk");
   var stop = document.getElementById("stop");
 
   // A token in the URL (the link the CLI logs) rides along on every call. Without
@@ -198,6 +204,28 @@
   var q = token ? "?token=" + encodeURIComponent(token) : "";
   var socket = null;
   var retry = 1000;
+
+  // ── JSON-RPC over /rpc ────────────────────────────────────────────────
+  // Requests get an id and a promise; anything with a method and no id is a
+  // notification. Until the history reply lands, notifications are held, and
+  // the ones history already covers (by seq) are dropped.
+  var nextId = 1;
+  var pending = {};
+  var held = null;  // notifications waiting for the history reply
+
+  function call(method, params) {
+    return new Promise(function (resolve, reject) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) { reject(new Error("not connected")); return; }
+      var id = nextId++;
+      pending[id] = { resolve: resolve, reject: reject };
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: id, method: method, params: params || {} }));
+    });
+  }
+
+  function failPending() {
+    Object.keys(pending).forEach(function (id) { pending[id].reject(new Error("disconnected")); });
+    pending = {};
+  }
 
   var setup = document.getElementById("setup");
   var settingsHref = "/settings" + q;
@@ -271,8 +299,9 @@
     activityEl.textContent = text;
   }
 
+  // `conversation.turn` gives the state; `conversation.activity` marks a tool step.
   function showActivity(entry) {
-    if (entry.state !== "thinking") { clearActivity(); return; }
+    if (entry.state !== "thinking" && typeof entry.step !== "string") { clearActivity(); return; }
     if (activity.timer === null) {
       activity.since = Date.now();
       activity.steps = 0;
@@ -295,13 +324,87 @@
   }
 
   // One transcript entry, whatever it is.
-  function show(entry) {
-    if (entry.role === "activity") { showActivity(entry); return; }
-    if (entry.role === "app") { addWidget(entry); return; }
-    if (entry.role === "app-result") { finishWidget(entry); return; }
-    if (entry.role === "choice") { addChoice(entry); return; }
-    if (entry.role === "choice-answered") { settleChoice(entry); return; }
-    addLine(entry.role, entry.text);
+  // ── push-to-talk ──────────────────────────────────────────────────────
+  // The server says whether the robot is in push-to-talk and whether the gate is
+  // open, held or latched; an antenna hold shows up here too. A press longer
+  // than HOLD_MS is a hold (letting go sends); a shorter one toggles the latch.
+  var listen = null;
+  var HOLD_MS = 300;
+  var press = { timer: null, holding: false };
+
+  function sendListen(fields) {
+    call("listen.set", fields).catch(function () { /* the close handler shows it */ });
+  }
+
+  function renderListen() {
+    if (!listen || listen.mode !== "push_to_talk") { talk.hidden = true; return; }
+    talk.hidden = false;
+    talk.classList.toggle("open", !!listen.enabled);
+    talk.setAttribute("aria-pressed", String(!!listen.latched));
+    if (listen.held) talk.textContent = "Listening — let go to send";
+    else if (listen.latched) talk.textContent = "Listening — tap to send";
+    else talk.textContent = "Hold to talk";
+  }
+
+  function pressStart(e) {
+    if (talk.disabled || press.timer !== null || press.holding) return;
+    if (e && e.preventDefault) e.preventDefault();
+    press.timer = setTimeout(function () {
+      press.timer = null;
+      press.holding = true;
+      sendListen({ held: true });
+    }, HOLD_MS);
+  }
+
+  function pressEnd() {
+    if (press.timer !== null) {  // let go before HOLD_MS: a tap
+      clearTimeout(press.timer);
+      press.timer = null;
+      sendListen({ toggle: true });
+    } else if (press.holding) {
+      press.holding = false;
+      sendListen({ held: false });
+    }
+  }
+
+  function pressCancel() {  // the pointer or the focus left: never a tap
+    if (press.timer !== null) { clearTimeout(press.timer); press.timer = null; }
+    if (press.holding) { press.holding = false; sendListen({ held: false }); }
+  }
+
+  talk.addEventListener("pointerdown", pressStart);
+  talk.addEventListener("pointerup", pressEnd);
+  talk.addEventListener("pointercancel", pressCancel);
+  talk.addEventListener("pointerleave", pressCancel);
+  talk.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  talk.addEventListener("click", function (e) { e.preventDefault(); });  // handled on pointer and key events
+  talk.addEventListener("keydown", function (e) {
+    if ((e.key === " " || e.key === "Enter") && !e.repeat) pressStart(e);
+  });
+  talk.addEventListener("keyup", function (e) {
+    if (e.key === " " || e.key === "Enter") pressEnd();
+  });
+  talk.addEventListener("blur", pressCancel);
+
+  function resetLog() {
+    log.replaceChildren();
+    clearActivity();
+    widgets = {};
+    choicesOnPage = {};
+  }
+
+  // One notification, whatever it is.
+  function show(method, params) {
+    params = params || {};
+    if (method === "conversation.transcript") addLine(params.role, params.text);
+    else if (method === "conversation.turn") showActivity(params);
+    else if (method === "conversation.activity") showActivity(params);
+    else if (method === "widgets.call") addWidget(params);
+    else if (method === "widgets.result") finishWidget(params);
+    else if (method === "choices.ask") addChoice(params);
+    else if (method === "choices.answered") settleChoice(params);
+    else if (method === "listen.state") { listen = params; renderListen(); }
+    else if (method === "conversation.history_cleared") resetLog();
   }
 
   // ── A question from a server (MCP elicitation), answered on the page ──
@@ -549,12 +652,13 @@
     var content = (request.params && request.params.content) || [];
     var text = content.filter(function (c) { return c && c.type === "text"; })
       .map(function (c) { return c.text; }).join("\n").trim();
-    if (!text || !socket || socket.readyState !== WebSocket.OPEN) {
+    if (!text) {
       reply(state, request.id, { isError: true });
       return;
     }
-    socket.send(JSON.stringify({ text: text }));
-    reply(state, request.id, {});
+    call("conversation.say", { text: text })
+      .then(function () { reply(state, request.id, {}); })
+      .catch(function () { reply(state, request.id, { isError: true }); });
   }
 
   // Only web links, in a new tab that cannot reach back to this page.
@@ -618,16 +722,36 @@
     msg.disabled = !live;
     send.disabled = !live;
     stop.disabled = !live;
+    talk.disabled = !live;
+    if (!live) pressCancel();
   }
 
   function connect() {
     var scheme = location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(scheme + "://" + location.host + "/ws" + q);
+    socket = new WebSocket(scheme + "://" + location.host + "/rpc" + q);
 
     socket.onopen = function () {
       retry = 1000;
       setLive(true, "connected");
       msg.focus();
+      held = [];
+      call("conversation.history").then(function (result) {
+        var events = (result && result.events) || [];
+        var seen = 0;
+        resetLog();
+        events.forEach(function (e) {
+          show(e.method, e.params);
+          if (e.params && e.params.seq > seen) seen = e.params.seq;
+        });
+        var late = held || [];
+        held = null;
+        late.forEach(function (n) {
+          if (!(n.params && n.params.seq <= seen)) show(n.method, n.params);
+        });
+      }).catch(function () { held = null; });
+      call("listen.state").then(function (state) {
+        if (state) { listen = state; renderListen(); }
+      }).catch(function () {});
     };
 
     socket.onmessage = function (event) {
@@ -637,18 +761,21 @@
       } catch (e) {
         return;
       }
-      if (data.role === "history") {
-        log.replaceChildren();
-        clearActivity();
-        widgets = {};
-        choicesOnPage = {};
-        (data.lines || []).forEach(show);
+      if (data.id !== undefined && data.id !== null && pending[data.id]) {
+        var p = pending[data.id];
+        delete pending[data.id];
+        if (data.error) p.reject(data.error);
+        else p.resolve(data.result);
         return;
       }
-      show(data);
+      if (typeof data.method !== "string") return;
+      if (held) held.push(data);
+      else show(data.method, data.params);
     };
 
     socket.onclose = function () {
+      failPending();
+      held = null;
       clearActivity();
       setLive(false, "disconnected — retrying");
       setTimeout(connect, retry);
@@ -659,7 +786,7 @@
   function submit() {
     var text = msg.value.trim();
     if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify({ text: text }));
+    call("conversation.say", { text: text }).catch(function () {});
     msg.value = "";
   }
 
@@ -668,9 +795,7 @@
     if (e.key === "Enter") submit();
   });
   stop.addEventListener("click", function () {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "interrupt" }));
-    }
+    call("conversation.interrupt").catch(function () {});
   });
 
   connect();

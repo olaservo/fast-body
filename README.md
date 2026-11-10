@@ -92,6 +92,7 @@ default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low   # any fast-agent
 | `ENABLE_CAMERA` | `true` (default) enables `camera`, `examine` and face tracking. |
 | `FACE_TRACKING` | `false` (default) waits for the brain to call `look_at_me`. `true` follows your face from startup. |
 | `ENABLE_BARGE_IN` | `true` (default) lets you talk over the robot. Set `false` for external or Bluetooth speakers, which get no echo cancellation. |
+| `LISTEN_MODE` | `always_on` (default) keeps the mic live. `push_to_talk` closes it until you hold an antenna or the companion page's Talk button, and letting go sends what you said. Needs `VOICE_BACKEND=realtime`. |
 | `ENABLE_MEMORY` | `true` (default) keeps the conversation across restarts. See [Memory](#memory). |
 | `WEB_CHAT_TOKEN` | Password for the companion page. See [Companion page](#companion-page). |
 | `FAST_BODY_SERVERS` | MCP servers from `fast-agent.config.yaml` to attach, comma-separated. On a robot, add servers from the settings page instead, since an app update overwrites the packaged config. |
@@ -170,7 +171,41 @@ The page shows the transcript live and has an input box, so typing reaches the b
 
 The page is also an [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) host. When the brain calls a tool that an MCP server pairs with a `ui://` resource, the page draws that resource's HTML, opening it as the call starts and filling it with the result. A widget can call tools itself, and the text of those results reaches the conversation so the brain hears about it. A widget can also send a message to the brain as if you had typed it, and open a web link in a new tab.
 
+### Push-to-talk
+
+By default the mic is always live and the server decides when you have finished a sentence. `LISTEN_MODE=push_to_talk` (also on the settings page) closes the mic until you ask for it: hold either antenna and speak, and letting go sends what you said. The companion page gets a Talk button that does the same, and a short tap on it keeps the mic open until the next tap. Opening the mic also cuts off a reply in progress. A hold with no speech in it, or shorter than a tenth of a second, sends nothing.
+
+It needs `VOICE_BACKEND=realtime`, which commits the audio on release; with the default `openai` backend the setting is ignored with a warning. The antenna hold is detected on the difference between where the robot put its antennas and where they are, so its own breathing and gestures do not count; `PTT_ANTENNA_PRESS_RAD` and `PTT_ANTENNA_RELEASE_RAD` tune it, and `PTT_ANTENNA=false` leaves only the button.
+
 The page is open to your network by default, and anyone who can reach it can talk through the robot and change its settings. To lock it, set a password under "Who can open this page" on the settings page. A browser then asks for it once and stays signed in. There is no TLS, so use the password on a network you trust. `WEB_CHAT_HOST=127.0.0.1` keeps the page on the robot itself.
+
+### Drive it from a JS app
+
+Everything the companion page does goes over one JSON-RPC 2.0 WebSocket at `/rpc` on port 8080, the socket the Reachy Mini daemon relays to the running app. A JS app using the Reachy Mini SDK reaches it from a phone or browser over WebRTC with `reachy.rpcCall(method, params)` and `reachy.onNotification(method, cb)`. On the LAN you can also open `ws://<robot>:8080/rpc` directly. The method names follow the conversation app's where the meaning is the same, so the Conversation panel in Pollen's `sdk-js-demo-app` drives fast-body once its `CONV_APP_NAME` is set to `fast_body`.
+
+Methods:
+
+| Method | Params | Result |
+|---|---|---|
+| `conversation.status` | | `ready`, `backend_connected`, `backend_error`, `errors`, `locked`, `personality`, `voice`, `listen_mode` |
+| `conversation.say` | `text` | sent as your next turn, as if typed |
+| `conversation.interrupt` | | stops the reply in progress |
+| `conversation.history` | | `events`: the last 60 transcript entries, as the notifications that carried them |
+| `conversation.mic` | `muted?` | `muted`; setting it needs push-to-talk |
+| `listen.state`, `listen.set` | `held?`, `latched?`, `toggle?` | the Talk button's state; `null` without push-to-talk |
+| `personalities.list`, `personalities.apply` | `name` | `apply` saves the card and returns `restart_required` |
+| `personalities.upload`, `.delete`, `.packs.lookup`, `.packs.install`, `.packs.update`, `.packs.remove` | as the settings page | |
+| `voices.list`, `voices.current`, `voices.apply` | `voice` | `apply` pins the voice and returns `restart_required` |
+| `servers.list`, `.save`, `.toggle`, `.delete` | as the settings page | MCP servers, attached live when the brain is up |
+| `memory.list`, `memory.forget` | `name` or `all` | |
+| `choices.answer` | `id`, `option`, `elaboration?` | answers a question a server asked |
+| `widgets.resource`, `widgets.call` | `server`, `uri` / `server`, `name`, `arguments` | an MCP App's HTML, and its own tool calls |
+
+Notifications: `conversation.transcript` (`role` is `user` or `assistant`), `conversation.turn` (`listening`, `thinking`, `speaking`, `ready`), `conversation.activity` (a tool step, with the label the card allows), `conversation.history_cleared`, `widgets.call` and `widgets.result`, `choices.ask` and `choices.answered`, `listen.state`. Each carries a `seq`, so a client that fetched `conversation.history` can drop the notifications it already covered. A refused request has a stable string in `error.data.reason`, such as `invalid_params`, `not_found` or `not_running`.
+
+Personality and voice are read when the conversation starts, so the `apply` methods save the setting for the next start. The daemon handles the `apps.*` namespace itself (start, stop, status) and never forwards it, so fast-body has no methods there.
+
+Access follows the page's password. The daemon's relay connects from the robot itself with no token and no `Origin` header, and is let in because the daemon has already authenticated the remote end. Any other client needs the password as `?token=` or the page's cookie, and a browser must come from the page's own origin.
 
 ### `--console` and `--tui`
 

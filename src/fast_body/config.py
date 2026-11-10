@@ -213,6 +213,7 @@ SETTABLE_ENV = (
     "OPENAI_TTS_VOICE",
     "FACE_TRACKING",
     "ENABLE_MEMORY",
+    "LISTEN_MODE",
     # Only through the page's /lock route, which checks the length and signs the
     # browser in; the generic /settings route refuses it.
     "WEB_CHAT_TOKEN",
@@ -339,6 +340,11 @@ class Config:
     # ("Turn detection is not supported for this transcription model"), which
     # would put endpointing back on us — the thing this backend exists to avoid.
     realtime_stt_model: str = field(default_factory=lambda: os.getenv("REALTIME_STT_MODEL", "gpt-transcribe"))
+    # In push-to-talk the person endpoints, so the session runs with no turn
+    # detection and the streaming model is the natural fit.
+    realtime_ptt_stt_model: str = field(
+        default_factory=lambda: os.getenv("REALTIME_PTT_STT_MODEL", "gpt-live-transcribe")
+    )
     realtime_noise_reduction: str = field(
         default_factory=lambda: os.getenv("REALTIME_NOISE_REDUCTION", "far_field").strip()
     )
@@ -417,6 +423,19 @@ class Config:
     # far-end reference no longer matches what is actually played — there the mic
     # is muted for the reply instead, at the cost of not hearing you during it.
     enable_barge_in: bool = field(default_factory=lambda: _flag("ENABLE_BARGE_IN", True))
+    # `always_on` (default): the mic is live and the server endpoints each turn.
+    # `push_to_talk`: the mic is closed until you hold an antenna or the chat
+    # page's button, and letting go sends what was said. Needs
+    # VOICE_BACKEND=realtime; the discrete backend keeps its own endpointing
+    # and runs always-on with a warning. See listen_gate.py.
+    listen_mode: str = field(default_factory=lambda: os.getenv("LISTEN_MODE", "always_on").strip().lower())
+    # Hold-to-talk by antenna, in push-to-talk mode: deflection past the press
+    # threshold (rad, measured minus commanded) for three polls opens the mic,
+    # and settling back under the release threshold sends. The defaults are the
+    # daemon's own antenna-touch calibration.
+    ptt_antenna: bool = field(default_factory=lambda: _flag("PTT_ANTENNA", True))
+    ptt_antenna_press_rad: float = field(default_factory=lambda: _number("PTT_ANTENNA_PRESS_RAD", 0.25))
+    ptt_antenna_release_rad: float = field(default_factory=lambda: _number("PTT_ANTENNA_RELEASE_RAD", 0.10))
     # Speak a turn's text as it arrives, ahead of each tool call, instead of once
     # after the last one.
     speak_between_tools: bool = field(default_factory=lambda: _flag("SPEAK_BETWEEN_TOOLS", True))
@@ -443,6 +462,10 @@ class Config:
     # The body tools are registered either way, so typing there drives the robot.
     # The robot speaks the replies when an OpenAI key is set.
     tui: bool = field(default_factory=lambda: _flag("FAST_BODY_TUI", False))
+
+    def push_to_talk(self) -> bool:
+        """Whether LISTEN_MODE asks for push-to-talk (whatever the backend can do)."""
+        return self.listen_mode == "push_to_talk"
 
     def tts_voice_overridden(self) -> bool:
         """Whether OPENAI_TTS_VOICE pins the voice regardless of personality."""

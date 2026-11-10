@@ -67,7 +67,7 @@ if _deferred:
 
 @fast.agent(
     name="body",
-    instruction=compose_instruction(_persona.instruction, cast=_persona.cast),
+    instruction=compose_instruction(_persona.instruction, cast=_persona.cast, push_to_talk=_cfg.push_to_talk()),
     servers=_servers,
     model=_persona.model,
     skills=_skills or None,

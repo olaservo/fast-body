@@ -72,6 +72,22 @@ class VoiceBackend(Protocol):
         """Release any audio / network resources."""
         ...
 
+    # Push-to-talk hooks are optional, looked up by name (see listen_gate.py):
+    # `supports_push_to_talk()`, `on_listen_open(continuous=)`,
+    # `on_listen_close(commit=)`, `on_listen_mode_changed(mode)`. Only the
+    # realtime backend has them, and the wrappers forward them.
+
+
+def supports_push_to_talk(backend: object) -> bool:
+    """Whether a backend (or the wrapper chain around one) can be gated.
+
+    The realtime backend answers True and the wrappers ask what they wrap;
+    everything else lacks the method. Push-to-talk needs the backend to
+    commit a turn on release, which only a streaming session can do.
+    """
+    probe = getattr(backend, "supports_push_to_talk", None)
+    return bool(probe()) if callable(probe) else False
+
 
 def build_backend(config: Config, robot, web_hub=None) -> VoiceBackend:
     """Construct the configured voice backend.
