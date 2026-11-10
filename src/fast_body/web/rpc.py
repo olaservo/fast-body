@@ -9,6 +9,10 @@ itself and never forwards it, so nothing here uses that namespace.
 Access: the daemon's relay connects from loopback with no token and no
 `Origin`, having already authenticated the remote end, so that peer is let in.
 Any other peer needs the page's token and, from a browser, its own origin.
+
+The relay carries any JS app the robot's owner opens, so the methods that
+change what runs on the robot (MCP servers, card uploads, card packs) refuse
+it. They stay available to the chat page and to clients on the network.
 """
 
 from __future__ import annotations
@@ -40,17 +44,39 @@ _LOOPBACK = {"127.0.0.1", "::1"}
 
 @dataclass
 class _Peer:
-    """One `/rpc` connection's own state: whether it has the Talk button down."""
+    """One `/rpc` connection's own state: whether it is the relay, and whether it has the Talk button down."""
 
+    relay: bool = False
     holding: bool = False
 
 
 _PEER: contextvars.ContextVar[_Peer | None] = contextvars.ContextVar("fast_body_rpc_peer", default=None)
 
 
+# Methods the relay may not call: each can make the robot run code it was not
+# shipped with.
+LAN_ONLY = frozenset(
+    {
+        "servers.save",
+        "servers.toggle",
+        "servers.delete",
+        "personalities.upload",
+        "personalities.delete",
+        "personalities.packs.install",
+        "personalities.packs.update",
+        "personalities.packs.remove",
+    }
+)
+
+
+def is_relay(websocket: Any) -> bool:
+    """The daemon's relay: loopback, and no `Origin`, which every browser sends."""
+    return not websocket.headers.get("origin") and bool(websocket.client) and websocket.client.host in _LOOPBACK
+
+
 def peer_allowed(websocket: Any, token: str | None) -> bool:
-    if not websocket.headers.get("origin") and websocket.client and websocket.client.host in _LOOPBACK:
-        return True  # the daemon's relay
+    if is_relay(websocket):
+        return True
     return token_ok(websocket, token) and origin_ok(websocket.headers)
 
 
@@ -74,7 +100,7 @@ class RpcGate:
         if not peer_allowed(websocket, self.server.token):
             await websocket.close(code=_WS_POLICY_VIOLATION)
             return
-        peer = _Peer()
+        peer = _Peer(relay=is_relay(websocket))
         reset = _PEER.set(peer)
         try:
             await self.app(scope, receive, send)
@@ -91,7 +117,16 @@ def _invalid(message: str) -> JsonRpcError:
 def expose(rpc: JsonRpcServer, name: str, op: Callable[[dict[str, Any]], Any]) -> None:
     """Register an operation shared with an HTTP route; its `RequestError` becomes an error with a reason."""
 
+    lan_only = name in LAN_ONLY
+
     async def handler(params: dict[str, Any]) -> Any:
+        peer = _PEER.get()
+        if lan_only and peer is not None and peer.relay:
+            raise JsonRpcError(
+                f"{name} is only available from the chat page on the robot's network",
+                reason="forbidden",
+                code=SERVER_ERROR,
+            )
         try:
             result = op(params)
             return await result if inspect.isawaitable(result) else result

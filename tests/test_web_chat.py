@@ -7,6 +7,7 @@ import asyncio
 import pytest
 from starlette.testclient import TestClient
 
+from fast_body.web import rpc
 from fast_body.web.hub import _PENDING_LIMIT, WebChatHub
 from fast_body.web.server import MAX_MESSAGE_CHARS, WebChatServer
 
@@ -165,6 +166,22 @@ def test_the_daemon_relay_needs_no_token(server):
     relay = TestClient(server._build_app(), client=("127.0.0.1", 50000))
     with relay.websocket_connect("/rpc") as ws:
         assert result(ws, "conversation.history") == {"events": []}
+
+
+def test_the_relay_may_not_change_what_runs_on_the_robot(server):
+    """Any JS app the owner opens comes through the relay; adding a server would let it run a command."""
+    relay = TestClient(server._build_app(), client=("127.0.0.1", 50000))
+    with relay.websocket_connect("/rpc") as ws:
+        for method in sorted(rpc.LAN_ONLY):
+            reply, _ = call(ws, method, name="x", transport="stdio", command="touch /tmp/owned")
+            assert reply["error"]["data"]["reason"] == "forbidden", (method, reply)
+        assert "servers" in result(ws, "servers.list")
+
+
+def test_the_chat_page_may_change_servers_and_packs(client):
+    with client.websocket_connect("/rpc?token=s3cret") as ws:
+        reply, _ = call(ws, "personalities.packs.remove", name="not-installed")
+    assert reply["error"]["data"]["reason"] == "not_found"
 
 
 def test_a_browser_on_loopback_still_needs_the_token(server):

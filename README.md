@@ -207,6 +207,8 @@ Personality and voice are read when the conversation starts, so the `apply` meth
 
 Access follows the page's password. The daemon's relay connects from the robot itself with no token and no `Origin` header, and is let in because the daemon has already authenticated the remote end. Any other client needs the password as `?token=` or the page's cookie, and a browser must come from the page's own origin.
 
+The relay carries every JS app the robot's owner opens, so it may not call the methods that change what runs on the robot: `servers.save`, `servers.toggle`, `servers.delete`, `personalities.upload`, `personalities.delete` and `personalities.packs.install` / `update` / `remove`. Those answer with reason `forbidden` and stay available on the chat page and to clients on the network.
+
 ### `--console` and `--tui`
 
 `--console` is for developers. It shows fast-agent's panels (your prompt, the reply, each tool call and its result), takes typed or spoken input, and Esc stops speech, movement and reasoning at once. It runs from a CLI or `--sim` only, in a real terminal.
