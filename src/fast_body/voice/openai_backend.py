@@ -89,13 +89,14 @@ class OpenAIVoiceBackend:
             self._started = True
 
     async def warm_up(self) -> None:
-        """Pay the TTS and player cold starts before the first reply instead of on it.
+        """Pay the TTS, resampler and player cold starts before the first reply instead of on it.
 
-        One discarded synthesis opens the provider connection while the brain is
+        scipy.signal is imported in a thread whatever happens to the TTS. One discarded synthesis opens the provider connection while the brain is
         still attaching its servers, then a beat of silence goes through the
         same push the reply will take. Failure is logged and otherwise ignored.
         """
         started = time.perf_counter()
+        resampler = asyncio.create_task(asyncio.to_thread(_load_resampler))
         try:
             self._ensure_started()
             async for _ in self._speaker.stream("Ready."):
@@ -103,6 +104,8 @@ class OpenAIVoiceBackend:
         except Exception as e:
             logger.warning("TTS warm-up failed: %s", e)
             return
+        finally:
+            await resampler
         logger.info("TTS warm-up took %.0f ms", (time.perf_counter() - started) * 1000)
         self._warm_up_player()
 
@@ -461,6 +464,21 @@ class _StreamResampler:
             self._buf = np.zeros(0, dtype=np.float32)
             self._head = 0
         return emitted
+
+
+def _load_resampler() -> None:
+    """Import scipy.signal off the event loop.
+
+    The import takes seconds on the robot, and the first reply otherwise pays
+    it on the loop (63 s on 2026-11-11, when the TTS warm-up had failed).
+    """
+    started = time.perf_counter()
+    try:
+        import scipy.signal  # noqa: F401
+    except Exception as e:
+        logger.warning("could not preload scipy.signal: %s", e)
+        return
+    logger.info("scipy.signal loaded in %.0f ms", (time.perf_counter() - started) * 1000)
 
 
 def _resample(x: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:

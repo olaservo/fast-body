@@ -398,3 +398,22 @@ async def test_warm_up_survives_a_player_that_refuses_the_push(monkeypatch) -> N
     backend = OpenAIVoiceBackend(Config(), FakeRobotAudio(Refuses()), speaker=_ToneSpeaker(24000, 0.1))
 
     await backend.warm_up()  # logged, not raised
+
+
+async def test_warm_up_loads_the_resampler_even_when_tts_fails(monkeypatch) -> None:
+    """Otherwise the first reply imports scipy.signal on the event loop."""
+    from fast_body.voice import openai_backend
+
+    class _FailingSpeaker:
+        async def stream(self, text: str):
+            raise RuntimeError("insufficient_quota")
+            yield b""
+
+    loaded: list[bool] = []
+    monkeypatch.setattr(openai_backend, "_load_resampler", lambda: loaded.append(True))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIVoiceBackend(Config(), FakeRobotAudio(FakeMedia([], in_rate=16000)), speaker=_FailingSpeaker())
+
+    await backend.warm_up()
+
+    assert loaded == [True]
