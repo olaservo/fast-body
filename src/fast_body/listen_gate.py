@@ -108,14 +108,17 @@ class ListenGate:
             self._schedule("on_listen_mode_changed", new_mode)
         self._notify()
 
-    def set_held(self, held: bool) -> None:
-        """Momentary push-to-talk control down (True) / up (False)."""
+    def set_held(self, held: bool, *, commit: bool = True) -> None:
+        """Momentary push-to-talk control down (True) / up (False).
+
+        ``commit=False`` on a release drops what the hold captured.
+        """
         with self._lock:
             if bool(held) == self._held:
                 return
             self._held = bool(held)
             # A momentary press with no latch => capture continuously until release.
-            self._apply_locked(continuous=self._held and not self._latched)
+            self._apply_locked(continuous=self._held and not self._latched, commit=commit)
         self._notify()  # the page shows the hold itself, not only the gate
 
     def set_latched(self, latched: bool) -> None:

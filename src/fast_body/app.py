@@ -27,18 +27,15 @@ from collections import Counter
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-import numpy as np
 from reachy_mini.apps.app import ReachyMiniApp
-from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini.utils import create_head_pose
-from reachy_mini.utils.interpolation import distance_between_poses
 
 from fast_body import choices, mcp_servers, memory, skills
 from fast_body.config import ENV_FILE, Config, config_sources
 from fast_body.embodiment import cues
 from fast_body.embodiment.context import RobotContext
 from fast_body.embodiment.gaze import GazeController
-from fast_body.embodiment.moves import MovementManager
+from fast_body.embodiment.moves import MovementManager, head_in_sleep_pose
 from fast_body.listen_gate import ALWAYS_ON, PUSH_TO_TALK, ListenGate
 from fast_body.physical_trigger import AntennaHoldDetector
 from fast_body.turn_speech import TurnSpeech, text_blocks
@@ -48,11 +45,6 @@ logger = logging.getLogger(__name__)
 
 _EMOTIONS_REPO = "pollen-robotics/reachy-mini-emotions-library"
 _DANCES_REPO = "pollen-robotics/reachy-mini-dances-library"
-
-# How close to the sleep pose still counts as asleep (matches the conversation
-# app's tolerances, which are tuned against the real robot's resting position).
-_SLEEP_TRANSLATION_TOLERANCE_M = 0.05
-_SLEEP_ROTATION_TOLERANCE_RAD = 0.35
 
 # How long a cancelled turn gets to wind down before the timeout is reported
 # anyway. A provider request stalled on the wire can swallow the cancel and
@@ -199,7 +191,7 @@ class FastBodyCore:
         started while Reachy naps otherwise begins mid-slump.
         """
         try:
-            if not self._head_in_sleep_pose():
+            if not head_in_sleep_pose(self.robot.get_current_head_pose()):
                 return False
             logger.info("robot is asleep — waking up")
             self.robot.wake_up()
@@ -207,21 +199,6 @@ class FastBodyCore:
         except Exception as e:
             logger.warning("wake-up check failed (continuing): %s", e)
             return False
-
-    def _head_in_sleep_pose(self) -> bool:
-        """Whether the head is near `SLEEP_HEAD_POSE` in both position and orientation.
-
-        Mirrors the conversation app's check. Raises if the robot is unreadable.
-        """
-        head_pose = np.asarray(self.robot.get_current_head_pose(), dtype=np.float64)
-        if head_pose.shape != (4, 4):
-            return False
-        # (translation in m, rotation in rad, a combined "magic-mm" figure)
-        distances = distance_between_poses(head_pose, SLEEP_HEAD_POSE)
-        return (
-            float(distances[0]) <= _SLEEP_TRANSLATION_TOLERANCE_M
-            and float(distances[1]) <= _SLEEP_ROTATION_TOLERANCE_RAD
-        )
 
     def _load_libraries(self) -> tuple[Any, Any]:
         loaded: list[Any] = []
@@ -522,10 +499,12 @@ class FastBodyCore:
         because two holds fired there with nobody at the robot, both antennas
         symmetric at about 0.3 rad for under a second.
 
-        Detection also pauses while the head is in the sleep pose. Something
-        other than this app put the robot there, the antennas no longer follow
-        the commanded pose, and the commanded breathing sway alone then reads
-        as a hold (2026-11-10: hold after hold on a sleeping robot).
+        Detection also pauses while the movement manager reports the robot
+        asleep: the antennas rest in the sleep pose whatever was last
+        commanded (2026-11-10: hold after hold on a sleeping robot). The
+        daemon's sleep move pulls the antennas off the commanded pose before
+        the head gets there, which starts a hold, so a hold open when sleep is
+        seen is dropped without sending what it captured.
         """
         gate = self.listen_gate
         assert gate is not None
@@ -545,13 +524,13 @@ class FastBodyCore:
         )
         while not self.stop_event.is_set():
             try:
-                was_asleep, asleep = asleep, gate.mode == PUSH_TO_TALK and self._head_in_sleep_pose()
+                was_asleep, asleep = asleep, gate.mode == PUSH_TO_TALK and self.movement.asleep()
                 if asleep != was_asleep:
                     logger.info("antenna hold-to-talk %s", "paused: robot is asleep" if asleep else "resumed")
                 if gate.mode != PUSH_TO_TALK or asleep or self.movement.move_active():
                     detector.reset()
                     if prev_held:
-                        gate.set_held(False)
+                        gate.set_held(False, commit=not asleep)
                         prev_held = False
                     await asyncio.sleep(poll_dt if gate.mode == PUSH_TO_TALK else 0.5)
                     continue

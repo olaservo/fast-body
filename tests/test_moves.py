@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
+
 from fast_body.embodiment.moves import (
     AntennaMove,
     BreathingMove,
@@ -132,3 +134,50 @@ def test_listening_ends_a_running_breath_and_holds_the_antennas(fake_robot):
     assert mgr.commanded_antennas() == before  # frozen where the sway left them
     mgr._step(now=5.0)
     assert mgr.commanded_antennas() == before  # and no new breath while listening
+
+
+def _steps(mgr, n: int, start: float = 0.0) -> float:
+    now = start
+    for _ in range(n):
+        now += mgr.period
+        mgr._step(now)
+    return now
+
+
+def test_a_robot_put_to_sleep_gets_no_more_poses_until_it_wakes(fake_robot):
+    mgr = _mgr(fake_robot)
+    awake_pose = fake_robot.head_pose
+    now = _steps(mgr, 50)
+    assert not mgr.asleep()
+
+    fake_robot.head_pose = SLEEP_HEAD_POSE.copy()
+    now = _steps(mgr, 50, now)
+    assert mgr.asleep()
+    assert not mgr.move_active()
+    sent = len(fake_robot.set_target_calls)
+    mgr.queue_move(AntennaMove("curious", *mgr.current_pose()))
+    now = _steps(mgr, 50, now)
+    assert len(fake_robot.set_target_calls) == sent
+    assert len(mgr._queue) == 0 and mgr.state.current_move is None
+
+    fake_robot.head_pose = awake_pose
+    now = _steps(mgr, 50, now)
+    assert not mgr.asleep()
+    assert len(fake_robot.set_target_calls) > sent
+
+
+def test_a_commanded_pose_near_the_sleep_pose_is_not_sleep(fake_robot):
+    mgr = _mgr(fake_robot)
+    mgr._listening = True  # hold the pose below instead of breathing away from it
+    mgr.state.last_primary_pose = (SLEEP_HEAD_POSE.copy(), (0.0, 0.0), 0.0)
+    fake_robot.head_pose = SLEEP_HEAD_POSE.copy()  # the head went where it was sent
+    _steps(mgr, 50)
+    assert not mgr.asleep()
+
+
+def test_an_unreadable_robot_is_not_asleep():
+    from tests.conftest import FakeRobot
+
+    mgr = _mgr(FakeRobot(readable=False))
+    _steps(mgr, 50)
+    assert not mgr.asleep()

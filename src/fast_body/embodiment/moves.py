@@ -29,8 +29,9 @@ from numpy.typing import NDArray
 from reachy_mini import ReachyMini
 from reachy_mini.motion.move import Move
 from reachy_mini.motion.recorded_move import RecordedMoves
+from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini.utils import create_head_pose
-from reachy_mini.utils.interpolation import linear_pose_interpolation
+from reachy_mini.utils.interpolation import distance_between_poses, linear_pose_interpolation
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,31 @@ CONTROL_LOOP_FREQUENCY_HZ = 100.0
 FullBodyPose = tuple[NDArray[np.float64], tuple[float, float], float]
 
 _NEUTRAL_HEAD = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
+
+# How close to the sleep pose still counts as asleep (matches the conversation
+# app's wake-up check).
+_SLEEP_TRANSLATION_TOLERANCE_M = 0.05
+_SLEEP_ROTATION_TOLERANCE_RAD = 0.35
+# How far the measured head may sit from the commanded one and still be
+# following it. The neutral pose is 4.9 cm and 0.43 rad from the sleep pose.
+_FOLLOW_TRANSLATION_TOLERANCE_M = 0.02
+_FOLLOW_ROTATION_TOLERANCE_RAD = 0.2
+_SLEEP_CHECK_EVERY_TICKS = 10  # 10 Hz
+_SLEEP_CHECK_SAMPLES = 3  # consecutive checks before the state flips
+
+
+def _poses_within(a: NDArray[np.float64], b: NDArray[np.float64], translation_m: float, rotation_rad: float) -> bool:
+    # (translation in m, rotation in rad, a combined "magic-mm" figure)
+    distances = distance_between_poses(a, b)
+    return float(distances[0]) <= translation_m and float(distances[1]) <= rotation_rad
+
+
+def head_in_sleep_pose(head_pose: Any) -> bool:
+    """Whether a head pose is near `SLEEP_HEAD_POSE` in both position and orientation."""
+    pose = np.asarray(head_pose, dtype=np.float64)
+    if pose.shape != (4, 4):
+        return False
+    return _poses_within(pose, SLEEP_HEAD_POSE, _SLEEP_TRANSLATION_TOLERANCE_M, _SLEEP_ROTATION_TOLERANCE_RAD)
 
 
 def _smoothstep(alpha: float) -> float:
@@ -238,6 +264,11 @@ class MovementManager:
     (e.g. the brain's tool calls). The control loop is the only writer to the
     robot.
 
+    When something else puts the robot to sleep (the daemon's sleep move, from
+    the desktop app), the loop stops sending poses and drops its moves until
+    the head leaves the sleep pose. Sending on held the robot down against the
+    daemon's wake-up (observed 2026-11-11).
+
         mgr = MovementManager(robot)
         mgr.start()
         mgr.queue_move(HeadLookMove("left", *mgr.current_pose()))
@@ -267,6 +298,10 @@ class MovementManager:
         self._shared_lock = threading.Lock()
         self._shared_commanded_antennas: tuple[float, float] = (0.0, 0.0)
         self._shared_move_active = False
+        self._shared_asleep = False
+        self._asleep = False
+        self._sleep_ticks = 0
+        self._sleep_votes = 0
 
     # ── public, thread-safe API ──────────────────────────────────────────
     def queue_move(self, move: Move) -> None:
@@ -299,6 +334,11 @@ class MovementManager:
         """
         with self._shared_lock:
             return self._shared_move_active
+
+    def asleep(self) -> bool:
+        """True while the robot rests in the sleep pose and no pose is being sent. Thread-safe."""
+        with self._shared_lock:
+            return self._shared_asleep
 
     def current_pose(self) -> tuple[NDArray[np.float64], tuple[float, float]]:
         """Best-effort current (head_pose, antennas) for seeding a new move.
@@ -343,6 +383,8 @@ class MovementManager:
             except Empty:
                 return
             if cmd == "queue" and isinstance(payload, Move):
+                if self._asleep:
+                    continue
                 self._queue.append(payload)
                 self.state.last_activity_time = self._now()
             elif cmd == "clear":
@@ -407,9 +449,59 @@ class MovementManager:
         assert last is not None
         return (last[0].copy(), last[1], last[2])
 
+    def _measured_asleep(self) -> bool:
+        """Whether the head rests in the sleep pose without having been sent there.
+
+        A move of ours that passes near the sleep pose has the measured head
+        following the commanded one, so it does not count.
+        """
+        try:
+            head = np.asarray(self.robot.get_current_head_pose(), dtype=np.float64)
+        except Exception:
+            return self._asleep
+        if not head_in_sleep_pose(head):
+            return False
+        if self._asleep:
+            return True
+        last = self.state.last_primary_pose
+        assert last is not None
+        return not _poses_within(head, last[0], _FOLLOW_TRANSLATION_TOLERANCE_M, _FOLLOW_ROTATION_TOLERANCE_RAD)
+
+    def _update_asleep(self, now: float) -> None:
+        self._sleep_ticks += 1
+        if self._sleep_ticks < _SLEEP_CHECK_EVERY_TICKS:
+            return
+        self._sleep_ticks = 0
+        if self._measured_asleep() == self._asleep:
+            self._sleep_votes = 0
+            return
+        self._sleep_votes += 1
+        if self._sleep_votes < _SLEEP_CHECK_SAMPLES:
+            return
+        self._sleep_votes = 0
+        self._asleep = not self._asleep
+        self._queue.clear()
+        self.state.current_move = None
+        self.state.move_start_time = None
+        self._breathing = False
+        if self._asleep:
+            logger.info("robot is asleep: holding off moves until it wakes")
+        else:
+            # Start again from where the robot now is, not from the pose held before it slept.
+            head, antennas = self.current_pose()
+            self.state.last_primary_pose = (np.asarray(head, dtype=np.float64).copy(), antennas, 0.0)
+            self.state.last_activity_time = now
+            logger.info("robot is awake: moves resumed")
+
     def _step(self, now: float) -> None:
         """One control tick: apply commands, advance the queue, send the pose, publish it."""
         self._drain_commands()
+        self._update_asleep(now)
+        if self._asleep:
+            with self._shared_lock:
+                self._shared_move_active = False
+                self._shared_asleep = True
+            return
         self._advance_queue(now)
         self._maybe_breathe(now)
         head, antennas, body_yaw = self._primary_pose(now)
@@ -421,6 +513,7 @@ class MovementManager:
         with self._shared_lock:
             self._shared_commanded_antennas = antennas
             self._shared_move_active = move is not None and not isinstance(move, BreathingMove)
+            self._shared_asleep = False
 
     def _run_loop(self) -> None:
         while not self._stop.is_set():
