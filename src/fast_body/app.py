@@ -196,19 +196,10 @@ class FastBodyCore:
         """Play the wake-up movement when we're launched onto a sleeping robot.
 
         The daemon only auto-wakes an app from a *proper* sleep pose, so an app
-        started while Reachy naps otherwise begins mid-slump. Detection mirrors
-        the conversation app: near enough to `SLEEP_HEAD_POSE` in both position
-        and orientation.
+        started while Reachy naps otherwise begins mid-slump.
         """
         try:
-            head_pose = np.asarray(self.robot.get_current_head_pose(), dtype=np.float64)
-            if head_pose.shape != (4, 4):
-                return False
-            # (translation in m, rotation in rad, a combined "magic-mm" figure)
-            distances = distance_between_poses(head_pose, SLEEP_HEAD_POSE)
-            if float(distances[0]) > _SLEEP_TRANSLATION_TOLERANCE_M:
-                return False
-            if float(distances[1]) > _SLEEP_ROTATION_TOLERANCE_RAD:
+            if not self._head_in_sleep_pose():
                 return False
             logger.info("robot is asleep — waking up")
             self.robot.wake_up()
@@ -216,6 +207,21 @@ class FastBodyCore:
         except Exception as e:
             logger.warning("wake-up check failed (continuing): %s", e)
             return False
+
+    def _head_in_sleep_pose(self) -> bool:
+        """Whether the head is near `SLEEP_HEAD_POSE` in both position and orientation.
+
+        Mirrors the conversation app's check. Raises if the robot is unreadable.
+        """
+        head_pose = np.asarray(self.robot.get_current_head_pose(), dtype=np.float64)
+        if head_pose.shape != (4, 4):
+            return False
+        # (translation in m, rotation in rad, a combined "magic-mm" figure)
+        distances = distance_between_poses(head_pose, SLEEP_HEAD_POSE)
+        return (
+            float(distances[0]) <= _SLEEP_TRANSLATION_TOLERANCE_M
+            and float(distances[1]) <= _SLEEP_ROTATION_TOLERANCE_RAD
+        )
 
     def _load_libraries(self) -> tuple[Any, Any]:
         loaded: list[Any] = []
@@ -515,6 +521,11 @@ class FastBodyCore:
         hand. Each transition logs the raw positions beside the residual,
         because two holds fired there with nobody at the robot, both antennas
         symmetric at about 0.3 rad for under a second.
+
+        Detection also pauses while the head is in the sleep pose. Something
+        other than this app put the robot there, the antennas no longer follow
+        the commanded pose, and the commanded breathing sway alone then reads
+        as a hold (2026-11-10: hold after hold on a sleeping robot).
         """
         gate = self.listen_gate
         assert gate is not None
@@ -526,6 +537,7 @@ class FastBodyCore:
         prev_held = False
         peak = 0.0  # largest residual seen since the last report
         next_report = time.monotonic() + 2.0
+        asleep = False
         logger.info(
             "antenna hold-to-talk on (press >= %.2f rad, release <= %.2f rad)",
             self.config.ptt_antenna_press_rad,
@@ -533,7 +545,10 @@ class FastBodyCore:
         )
         while not self.stop_event.is_set():
             try:
-                if gate.mode != PUSH_TO_TALK or self.movement.move_active():
+                was_asleep, asleep = asleep, gate.mode == PUSH_TO_TALK and self._head_in_sleep_pose()
+                if asleep != was_asleep:
+                    logger.info("antenna hold-to-talk %s", "paused: robot is asleep" if asleep else "resumed")
+                if gate.mode != PUSH_TO_TALK or asleep or self.movement.move_active():
                     detector.reset()
                     if prev_held:
                         gate.set_held(False)

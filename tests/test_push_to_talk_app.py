@@ -7,6 +7,7 @@ import logging
 import threading
 
 import pytest
+from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 
 from fast_body.app import FastBodyCore
 from fast_body.config import Config
@@ -223,6 +224,49 @@ async def test_a_move_starting_mid_hold_releases_it_and_pauses_detection(ptt_env
     core.movement.move_active = lambda: False  # type: ignore[method-assign]
     await asyncio.sleep(0.2)
     assert not gate.held  # a new baseline was taken from the held position; only a change counts
+    await core._stop_antenna_loop()
+
+
+async def test_a_sleeping_robot_opens_nothing_until_it_wakes(ptt_env):
+    robot = AntennaRobot()
+    voice = GatedVoice()
+    core = _core(robot, voice)
+    core._bind_listen_gate(None)
+    gate = core.listen_gate
+    await asyncio.sleep(0.2)
+    awake_pose = robot.head_pose
+
+    # Put to sleep from outside the app: the antennas rest at the sleep pose
+    # and no longer follow what the app commands.
+    robot.head_pose = SLEEP_HEAD_POSE.copy()
+    robot.antennas = [-3.05, 3.05]
+    await asyncio.sleep(0.2)
+    robot.antennas = [-2.7, 2.7]  # a residual change the size of a commanded sway
+    await asyncio.sleep(0.2)
+    assert not gate.held
+    assert voice.calls == []
+
+    robot.head_pose = awake_pose
+    robot.antennas = [0.0, 0.0]
+    await asyncio.sleep(0.2)
+    assert not gate.held  # waking is a new baseline, not a hold
+    robot.antennas = [0.4, 0.0]
+    await _until(lambda: gate.held)
+    await core._stop_antenna_loop()
+
+
+async def test_falling_asleep_mid_hold_releases_it(ptt_env):
+    robot = AntennaRobot()
+    voice = GatedVoice()
+    core = _core(robot, voice)
+    core._bind_listen_gate(None)
+    gate = core.listen_gate
+    await asyncio.sleep(0.2)
+    robot.antennas = [0.4, 0.0]
+    await _until(lambda: gate.held)
+
+    robot.head_pose = SLEEP_HEAD_POSE.copy()
+    await _until(lambda: not gate.held)
     await core._stop_antenna_loop()
 
 
