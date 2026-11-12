@@ -39,8 +39,8 @@ _FORM_KEYS = ("transport", "url", "command", "args", "headers")
 ATTACH_TIMEOUT_S = 15.0
 
 # A sleeping free HF Space takes longer than ATTACH_TIMEOUT_S to wake.
-# warm_up() wakes every http server at once before the attaches; retry_failed()
-# keeps trying the rest in the background.
+# warm_up() wakes an http server before its attach; retry_failed() keeps
+# trying the ones that still failed.
 WARM_UP_TIMEOUT_S = 90.0
 WARM_UP_SLOW_S = 3.0  # above this the log says the server was asleep
 RETRY_DELAYS_S: tuple[float, ...] = (20.0, 40.0, 80.0)
@@ -348,8 +348,16 @@ async def warm_up(names: list[str] | None = None) -> str:
     return ", ".join(notes)
 
 
-async def attach_enabled(brain: Any) -> str:
+async def attach_enabled(
+    brain: Any, after: Any = None, needed: list[str] | None = None, ready: asyncio.Event | None = None
+) -> str:
     """Attach every enabled stored server at startup. One line for the log.
+
+    Each server is warmed and attached on its own, so one that is asleep or
+    unreachable holds up none of the others. The attaches themselves go one
+    at a time, and `after` (the skills sync) runs behind each that worked.
+    `ready` is set once every server in `needed` has attached or failed, so
+    the caller can hold the first turn for those and no longer.
 
     Failures are per-server and never fatal: a robot whose fetch server is
     down should still talk. What failed is kept for retry_failed().
@@ -358,21 +366,44 @@ async def attach_enabled(brain: Any) -> str:
     wanted = [n for n, e in sorted(servers.items()) if _enabled(e)]
     _startup_failures.clear()
     if not wanted:
+        if ready is not None:
+            ready.set()
         return "no user servers"
-    warmed = await warm_up(wanted)
-    attached: list[str] = []
-    failed: list[str] = []
-    for name in wanted:
-        ok, _ = await attach(brain, name)
-        (attached if ok else failed).append(name)
+    turn = asyncio.Lock()
+
+    async def one(name: str) -> tuple[bool, str]:
+        warmed = await warm_up([name])
+        async with turn:
+            ok, _ = await attach(brain, name)
+            if ok and after is not None:
+                try:
+                    await after()
+                except Exception as e:
+                    logger.warning("mcp: after attaching %s: %s", name, e)
+        return ok, warmed
+
+    tasks = {name: asyncio.ensure_future(one(name)) for name in wanted}
+    try:
+        try:
+            await asyncio.gather(*(tasks[name] for name in needed or [] if name in tasks))
+        finally:
+            if ready is not None:
+                ready.set()
+        results = await asyncio.gather(*tasks.values())
+    finally:
+        for task in tasks.values():
+            task.cancel()
+    attached = [name for name, (ok, _) in zip(wanted, results) if ok]
+    failed = [name for name, (ok, _) in zip(wanted, results) if not ok]
     _startup_failures.extend(failed)
     parts = []
     if attached:
         parts.append("attached " + ", ".join(attached))
     if failed:
         parts.append("failed " + ", ".join(failed))
-    if "woke" in warmed or "unreachable" in warmed:
-        parts.append(warmed)
+    slow = [warmed for _, warmed in results if "woke" in warmed or "unreachable" in warmed]
+    if slow:
+        parts.append(", ".join(slow))
     return "; ".join(parts)
 
 

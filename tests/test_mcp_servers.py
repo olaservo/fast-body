@@ -10,7 +10,9 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from fast_body import mcp_servers
+from fast_body import mcp_servers, memory, personality, skills
+from fast_body.app import FastBodyCore
+from fast_body.config import Config
 from fast_body.web.hub import WebChatHub
 from fast_body.web.server import WebChatServer
 
@@ -402,13 +404,42 @@ def test_startup_warms_before_attaching_and_keeps_the_failures(store, monkeypatc
 
     async def fake_warm(names=None):
         order.append("warm " + ",".join(names or []))
-        return "b woke in 12 s, 1 up"
+        return "b woke in 12 s" if names == ["b"] else "1 up"
 
     monkeypatch.setattr(mcp_servers, "warm_up", fake_warm)
     brain = FakeBrain(fail="b")
-    assert asyncio.run(mcp_servers.attach_enabled(brain)) == "attached a; failed b; b woke in 12 s, 1 up"
-    assert order == ["warm a,b"]
+    assert asyncio.run(mcp_servers.attach_enabled(brain)) == "attached a; failed b; b woke in 12 s"
+    assert order == ["warm a", "warm b"]
     assert mcp_servers.startup_failures() == ["b"]
+
+
+def test_a_server_slow_to_warm_does_not_hold_the_others(store, monkeypatch):
+    mcp_servers.save_server("asleep", transport="http", url="https://a.test/mcp")
+    mcp_servers.save_server("up", transport="http", url="https://b.test/mcp")
+    woken = asyncio.Event()
+    synced: list[list[str]] = []
+
+    async def fake_warm(names=None):
+        if names == ["asleep"]:
+            await woken.wait()
+        return "1 up"
+
+    monkeypatch.setattr(mcp_servers, "warm_up", fake_warm)
+    brain = FakeBrain()
+
+    async def after():
+        synced.append([c[1] for c in brain.attach_calls])
+
+    async def run():
+        task = asyncio.ensure_future(mcp_servers.attach_enabled(brain, after=after))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert synced == [["up"]]  # attached and synced while the other still sleeps
+        woken.set()
+        return await task
+
+    assert asyncio.run(run()) == "attached asleep, up"
+    assert synced == [["up"], ["up", "asleep"]]
 
 
 def test_retry_attaches_later_and_syncs_skills_once(store, monkeypatch):
@@ -472,3 +503,36 @@ def test_a_hub_url_without_a_bearer_uses_the_robots_hub_login(store, fake_httpx,
     assert [s["hub_login"] for s in mcp_servers.list_servers()] == [False, False, True]
     config = mcp_servers._server_config(mcp_servers._load()["space"])
     assert config.headers["Authorization"] == "Bearer hf_robot"
+
+
+async def test_the_first_turn_waits_for_a_server_the_card_names(store, monkeypatch, fake_robot):
+    """A card's server is attached before _attach_brain returns; the rest are not waited for."""
+    mcp_servers.save_server("game", transport="http", url="https://game.test/mcp")
+    mcp_servers.save_server("other", transport="http", url="https://other.test/mcp")
+    game_up, other_up = asyncio.Event(), asyncio.Event()
+
+    async def fake_warm(names=None):
+        await (game_up if names == ["game"] else other_up).wait()
+        return "1 up"
+
+    async def resume(brain, config):
+        return SimpleNamespace(status="fresh", resumed=False)
+
+    async def sync(brain):
+        return "no server offers skills"
+
+    monkeypatch.setattr(mcp_servers, "warm_up", fake_warm)
+    monkeypatch.setattr(mcp_servers, "RETRY_DELAYS_S", ())
+    monkeypatch.setattr(memory, "resume_recent", resume)
+    monkeypatch.setattr(memory, "apply_context_budget", lambda brain, config: "ok")
+    monkeypatch.setattr(skills, "sync_from_servers", sync)
+    monkeypatch.setattr(personality, "load_personality", lambda name: SimpleNamespace(servers=["game"], activity={}))
+
+    core = FastBodyCore(fake_robot, owns_robot=False, stop_event=threading.Event(), config=Config())
+    brain = FakeBrain()
+    asyncio.get_running_loop().call_later(0.05, game_up.set)
+    await core._attach_brain(brain)
+    assert [c[1] for c in brain.attach_calls] == ["game"]
+    other_up.set()
+    await core._mcp_startup
+    assert [c[1] for c in brain.attach_calls] == ["game", "other"]

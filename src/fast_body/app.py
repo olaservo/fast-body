@@ -166,7 +166,7 @@ class FastBodyCore:
         self.web: Any = None
         self.web_hub: Any = None
         self._turn_speech: TurnSpeech | None = None
-        self._mcp_retry: asyncio.Task | None = None
+        self._mcp_startup: asyncio.Task | None = None
         self._wobbling = False
         # Push-to-talk: built in _start_body from the config as finally loaded.
         self.listen_gate: ListenGate | None = None
@@ -380,7 +380,7 @@ class FastBodyCore:
                     await self._converse(brain)
         finally:
             choices.bind(None)
-            retry = self._mcp_retry
+            retry = self._mcp_startup
             if retry is not None and not retry.done():
                 retry.cancel()
             if self.web is not None:
@@ -573,36 +573,53 @@ class FastBodyCore:
         resume = await memory.resume_recent(brain, self.config)
         logger.info("memory: %s", resume.status)
         logger.info("context: %s", memory.apply_context_budget(brain, self.config))
-        logger.info("mcp: %s", await mcp_servers.attach_enabled(brain))
         logger.info("skills: %s", await skills.sync_from_servers(brain))
-        if mcp_servers.startup_failures():
-            # A Space that was asleep, or a laptop not yet on the network:
-            # keep trying while the robot talks, rather than losing the
-            # server for the whole session.
-            self._mcp_retry = asyncio.create_task(
-                mcp_servers.retry_failed(
-                    brain,
-                    mcp_servers.startup_failures(),
-                    after=lambda: skills.sync_from_servers(brain),
-                )
-            )
+        from fast_body.personality import load_personality
+
+        persona = load_personality(self.config.personality)
+        # The user's servers attach while the robot already talks: a Space
+        # that is asleep or a laptop off the network would otherwise hold the
+        # first turn back for as long as its warm-up takes. The servers the
+        # card names are waited for, since the card's instruction counts on
+        # their tools.
+        card_ready = asyncio.Event()
+        self._mcp_startup = asyncio.create_task(
+            self._attach_servers(brain, list(persona.servers), card_ready), name="mcp-startup"
+        )
+        await card_ready.wait()
         if self.web is not None:
             # From here the settings page can attach and detach live.
             self.web.bind_brain(brain, asyncio.get_running_loop())
             # Every tool call marks the page and flicks the antennas;
             # those with a widget draw on the page too.
-            from fast_body.personality import load_personality
             from fast_body.web import apps
 
             apps.observe(
                 brain.resolve_agent(None),
                 self.web_hub,
-                steps=load_personality(self.config.personality).activity,
+                steps=persona.activity,
                 on_call=self._tool_tick,
             )
         if self._turn_speech is not None:
             self._turn_speech.install(brain.resolve_agent(None))
         return resume
+
+    async def _attach_servers(self, brain: Any, needed: list[str], ready: asyncio.Event) -> None:
+        """Attach the user's MCP servers and pull their skills, then keep retrying the ones that failed.
+
+        `ready` is set once the servers in `needed` have attached or failed.
+        """
+
+        async def sync() -> None:
+            logger.info("skills: %s", await skills.sync_from_servers(brain))
+
+        try:
+            logger.info("mcp: %s", await mcp_servers.attach_enabled(brain, after=sync, needed=needed, ready=ready))
+            await mcp_servers.retry_failed(brain, mcp_servers.startup_failures(), after=sync)
+        except Exception:
+            logger.exception("mcp: attaching the user's servers failed")
+        finally:
+            ready.set()
 
     async def _reopen(self, brain: Any) -> None:
         """Show and say that a conversation was picked back up.
