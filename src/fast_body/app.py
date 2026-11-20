@@ -30,7 +30,7 @@ from typing import Any
 from reachy_mini.apps.app import ReachyMiniApp
 from reachy_mini.utils import create_head_pose
 
-from fast_body import choices, mcp_servers, memory, skills
+from fast_body import choices, events, mcp_servers, memory, skills
 from fast_body.config import ENV_FILE, Config, config_sources
 from fast_body.embodiment import cues
 from fast_body.embodiment.context import RobotContext
@@ -53,6 +53,9 @@ _CANCEL_GRACE_S = 5.0
 # The daemon force-kills an app 20 s after SIGINT. Exit hard before that if a
 # clean shutdown has not finished, so the daemon never has to.
 _SHUTDOWN_DEADLINE_S = 15.0
+# How long an event that arrives mid-sentence waits for the transcript, so the
+# words and the event go to the brain as one turn.
+_WAKE_HOLD_S = 8.0
 # How often the antenna hold loop reads the joints. The detector needs three
 # consecutive over-threshold reads, so this is also a 100 ms debounce.
 _PTT_ANTENNA_POLL_HZ = 30.0
@@ -143,8 +146,27 @@ def _turn_usage(agent: Any, start_index: int) -> str:
     return "; " + ", ".join(parts)
 
 
+def _provider_failed(agent: Any, start: int) -> bool:
+    """Whether the turn ended in a provider error.
+
+    fast-agent does not raise one from `send()`: it comes back as a reply
+    carrying the error channel.
+    """
+    try:
+        from fast_agent.constants import FAST_AGENT_ERROR_CHANNEL
+
+        history = agent.message_history
+        return len(history) > start and FAST_AGENT_ERROR_CHANNEL in (history[-1].channels or {})
+    except Exception:
+        return False
+
+
 class FastBodyCore:
     """Orchestrates one embodied conversation session."""
+
+    # MCP Events the card subscribes to; None when it lists none (events.py).
+    _wakes: events.EventWakes | None = None
+    _heard_speech = False  # the listen in flight has heard speech begin
 
     def __init__(
         self,
@@ -418,7 +440,7 @@ class FastBodyCore:
             if hasattr(self.voice, "start"):  # backends with an input task of their own
                 await self.voice.start(self.stop_event)
         if hasattr(self.voice, "on_speech_start"):
-            self.voice.on_speech_start(lambda: self._cue(cues.LISTENING))
+            self.voice.on_speech_start(self._on_speech_start)
         self._bind_listen_gate(web_hub)
         self._turn_speech = self._build_turn_speech()
         warm_up = self._start_tts_warm_up()
@@ -587,9 +609,14 @@ class FastBodyCore:
             self._attach_servers(brain, list(persona.servers), card_ready), name="mcp-startup"
         )
         await card_ready.wait()
+        if persona.events:
+            manager = events.manager_for(brain.resolve_agent(None))
+            if manager is not None:
+                self._wakes = events.EventWakes(manager, persona.events)
+                await self._subscribe_events(brain)
         if self.web is not None:
             # From here the settings page can attach and detach live.
-            self.web.bind_brain(brain, asyncio.get_running_loop())
+            self.web.bind_brain(brain, asyncio.get_running_loop(), lambda: self._subscribe_events(brain))
             # Every tool call marks the page and flicks the antennas;
             # those with a widget draw on the page too.
             from fast_body.web import apps
@@ -604,6 +631,20 @@ class FastBodyCore:
             self._turn_speech.install(brain.resolve_agent(None))
         return resume
 
+    def _on_speech_start(self) -> None:
+        self._heard_speech = True
+        self._cue(cues.LISTENING)
+
+    async def _subscribe_events(self, brain: Any) -> None:
+        """Subscribe the card's events on the servers attached so far."""
+        if self._wakes is None:
+            return
+        try:
+            attached = brain.resolve_agent(None).list_attached_mcp_servers()
+            logger.info("events: %s", await self._wakes.subscribe(attached))
+        except Exception:
+            logger.exception("events: subscribing failed")
+
     async def _attach_servers(self, brain: Any, needed: list[str], ready: asyncio.Event) -> None:
         """Attach the user's MCP servers and pull their skills, then keep retrying the ones that failed.
 
@@ -612,6 +653,7 @@ class FastBodyCore:
 
         async def sync() -> None:
             logger.info("skills: %s", await skills.sync_from_servers(brain))
+            await self._subscribe_events(brain)
 
         try:
             logger.info("mcp: %s", await mcp_servers.attach_enabled(brain, after=sync, needed=needed, ready=ready))
@@ -661,15 +703,21 @@ class FastBodyCore:
             # Breathe while waiting; the backend cues LISTENING at speech onset
             # (on_speech_start, bound in run), so the pose reads as a reaction.
             self._cue(cues.IDLE)
-            text = await self._listen_or_stop()
+            text, woke = await self._listen_or_wake()
             if self.stop_event.is_set():
                 break
-            if not text:
+            wakes = self._wakes
+            if woke:
+                text = events.WAKE_PROMPT
+            elif not text:
                 if is_text:  # EOF on stdin → end the session
                     break
                 continue  # silence / no speech → keep listening
             user_done = time.perf_counter()
-            logger.info("user: %s", text)
+            if woke:
+                logger.info("event wake: starting a turn")
+            else:
+                logger.info("user: %s", text)
 
             self._cue(cues.THINKING)
             self._tool_calls = 0
@@ -691,19 +739,36 @@ class FastBodyCore:
                 await asyncio.wait({turn}, timeout=_CANCEL_GRACE_S)
                 self._drop_turn(agent, start)
                 break
+            failed = False
             if not turn.done():
                 await self._abandon_turn(turn)
                 self._drop_turn(agent, start)
-                reply, interrupted = "Sorry, I lost my train of thought there.", False
+                reply, interrupted, failed = "Sorry, I lost my train of thought there.", False, True
             else:
                 try:
                     reply, interrupted = turn.result()
                 except Exception as e:
                     logger.error("brain error: %s", e)
                     self._drop_turn(agent, start)
-                    reply, interrupted = "Sorry, my mind went blank for a second.", False
+                    reply, interrupted, failed = "Sorry, my mind went blank for a second.", False, True
             if interrupted:  # Escape during reasoning → drop the turn, back to input
+                if wakes is not None:
+                    wakes.drop()
                 continue
+            if wakes is not None:
+                if not failed and _provider_failed(agent, start):
+                    failed = True
+                    if woke:
+                        logger.error("brain error on an event turn: %s", reply)
+                        self._drop_turn(agent, start)
+                if failed:
+                    retrying = wakes.turn_failed()
+                    if woke:
+                        # Nobody asked for this turn, so nobody is told it failed.
+                        logger.info("event turn failed; %s", "will retry" if retrying else "not retrying")
+                        continue
+                else:
+                    wakes.turn_ok()
             if self._stopping.is_set():
                 break  # a stop came in while the turn finished; say nothing more
             if agent is not None and isinstance(reply, str):
@@ -797,6 +862,33 @@ class FastBodyCore:
         text, stopped = await self._unless_stopped(self.voice.listen())
         return None if stopped else text
 
+    async def _listen_or_wake(self) -> tuple[str | None, bool]:
+        """Listen, or return early when an MCP event should start the turn.
+
+        Returns ``(text, woke)``. An event that arrives while someone is
+        mid-sentence waits for their transcript: the words start the turn and
+        the event rides along with it.
+        """
+        wakes = self._wakes
+        if wakes is None:
+            return await self._listen_or_stop(), False
+        self._heard_speech = False
+        listen = asyncio.ensure_future(self._listen_or_stop())
+        wake = asyncio.ensure_future(wakes.wait())
+        try:
+            await asyncio.wait({listen, wake}, return_when=asyncio.FIRST_COMPLETED)
+            if not listen.done() and self._heard_speech:
+                await asyncio.wait({listen}, timeout=_WAKE_HOLD_S)
+            if listen.done():
+                text = listen.result()
+                return (text, False) if text or not wake.done() else (None, True)
+            return None, True
+        finally:
+            for task in (listen, wake):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(listen, wake, return_exceptions=True)
+
     async def _speak_or_stop(self, text: str) -> None:
         """`voice.speak()`, cut off the moment a stop is requested.
 
@@ -819,7 +911,14 @@ class FastBodyCore:
             return None, True
         task = asyncio.ensure_future(coro)
         stop = asyncio.ensure_future(self._stopping.wait())
-        done, _ = await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            done, _ = await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # An event turn cancels the listen it raced; the read goes with it.
+            stop.cancel()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
         if task in done:
             stop.cancel()
             return task.result(), False

@@ -70,6 +70,8 @@ async def _apply_live(server: WebChatServer, name: str, enabled: bool) -> str:
                 # the way startup does, so the page doesn't need a restart.
                 synced = await server._on_brain(skills.sync_from_servers(server._brain), timeout=60.0)
                 message = f"{message}; skills: {synced}"
+                if server._after_attach is not None:
+                    await server._on_brain(server._after_attach(), timeout=30.0)
         else:
             ok, message = await server._on_brain(mcp_servers.detach(server._brain, name), timeout=10.0)
     except Exception as e:

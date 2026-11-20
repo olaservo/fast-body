@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fast_body.config import MEMORY_DIR, PACKAGE_DIR
+from fast_body.events import EventSpec, parse_specs
 from fast_body.voice.cast import Cast
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,9 @@ class Personality:
     # doing while that tool runs ("glancing across the room"). A tool not listed
     # shows as an unnamed step, so the card decides which tool names the page shows.
     activity: dict[str, str] = field(default_factory=dict)
+    # `variables.events`: MCP Events to subscribe to once the card's servers
+    # are attached, see events.py.
+    events: list[EventSpec] = field(default_factory=list)
 
 
 def _external_dir() -> Path | None:
@@ -174,6 +178,7 @@ def _load_card(name: str, path: Path) -> Personality:
         # The card's own name is a way back to its voice: `[tavern]` on the tavern card.
         cast=Cast.from_card(variables.get("cast"), narrator_names=(name,)),
         activity=_activity_labels(variables.get("activity")),
+        events=parse_specs(variables.get("events")),
     )
 
 

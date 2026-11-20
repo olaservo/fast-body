@@ -27,7 +27,12 @@ dependencies = [
   # Pinned exactly: the daemon installs apps with a plain `uv pip install`,
   # which takes the newest release a floor allows and never reads uv.lock.
   # Upgrading is: bump here, `uv lock`, tests, deploy.
-  "fast-agent-mcp==0.10.46",
+  # On the fork for MCP Events (poll delivery), which is not upstream yet. The
+  # branch is feat/mcp-events-poll-hub1: the events work on 0.10.54, plus one
+  # commit that lets huggingface_hub stay on 1.x. fast-agent pins 2.3.0 from
+  # 0.10.47 on and reachy-mini requires <2.0.0, so upstream cannot install
+  # beside it.
+  "fast-agent-mcp @ git+https://github.com/olaservo/fast-agent@1461772a543cf47e49c409af0570ec803b28d0e7",
   # fast-agent 0.10.x needs a fastmcp-slim 4.0 pre-release. uv only allows a
   # pre-release when a *direct* dependency asks for one, and the daemon installs
   # apps with a plain `uv pip install`, which ignores [tool.uv]. Declaring it here
@@ -35,8 +40,8 @@ dependencies = [
   "fastmcp-slim>=4.0.0b2",
   "prompt_toolkit",  # interactive dev console input layer (also a fast-agent dep)
   # Same reason as fast-agent-mcp. The realtime transcription session needs
-  # the GA surface from 2.28.0 on; 3.24.0 is what fast-agent 0.10.46 pins.
-  "openai==3.24.0",
+  # the GA surface from 2.28.0 on; 3.40.0 is what fast-agent 0.10.54 pins.
+  "openai==3.52.0",
   "numpy",
   "scipy",
   "python-dotenv",

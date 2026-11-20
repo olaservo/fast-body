@@ -526,7 +526,7 @@ async def test_the_first_turn_waits_for_a_server_the_card_names(store, monkeypat
     monkeypatch.setattr(memory, "resume_recent", resume)
     monkeypatch.setattr(memory, "apply_context_budget", lambda brain, config: "ok")
     monkeypatch.setattr(skills, "sync_from_servers", sync)
-    monkeypatch.setattr(personality, "load_personality", lambda name: SimpleNamespace(servers=["game"], activity={}))
+    monkeypatch.setattr(personality, "load_personality", lambda name: SimpleNamespace(servers=["game"], activity={}, events=[]))
 
     core = FastBodyCore(fake_robot, owns_robot=False, stop_event=threading.Event(), config=Config())
     brain = FakeBrain()

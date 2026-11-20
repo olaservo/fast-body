@@ -126,6 +126,19 @@ You are a robot of staggering intelligence and no enthusiasm whatsoever. …
 
 Under `variables:`, `voice` is which voice speaks and `delivery` is how it speaks: tone, pace, whether sentences lift or fall. A card can also set `model:` to use a different brain, `servers:` to attach extra MCP servers, and `variables.activity` to name tool calls on the chat page (`dance: striking up a tune`).
 
+A card can subscribe to MCP Events from its servers with `variables.events`, a list of `server`, `name`, optional `arguments` and optional `wake`. What arrives is handed to the brain at the start of its next turn, marked as untrusted data. With `wake: true` an event also starts a turn when nobody is speaking, and the robot says the reply aloud. The server has to offer the event by poll and be attached with `protocol_mode: modern`.
+
+```yaml
+servers: [forge]
+variables:
+  events:
+    - server: forge
+      name: forge.your_move
+      wake: true
+    - server: forge
+      name: forge.chat
+```
+
 A card can carry a **cast** of other characters, each with its own voice. The brain marks a character's line with the name in square brackets, `[Innkeeper] We're closed.`, and the robot speaks it in that character's voice. `[narrator]` returns to the card's own voice. The shipped `tavern` card is a full example.
 
 ```yaml

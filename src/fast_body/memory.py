@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from fast_body.config import MEMORY_DIR, Config
+from fast_body.events import is_event_text
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,8 @@ def resumed_transcript(history: Sequence[Any]) -> list[dict[str, str]]:
         if role not in ("user", "assistant"):
             continue
         text = _message_text(message)
+        if role == "user" and is_event_text(text):
+            continue  # an MCP event or the prompt sent with it; nobody said it
         if text:
             lines.append({"role": "user" if role == "user" else "robot", "text": text})
     return lines

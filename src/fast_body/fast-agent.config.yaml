@@ -24,6 +24,12 @@ compaction:
   auto: true
   keep_turns: 2
 
+# Programmatic tool calling: the model writes Python that calls the tools,
+# through one tool named exec_sandbox. Off, because the chat page's activity
+# labels and the antenna tick are keyed on the names of the tools called.
+ptc:
+  enabled: false
+
 # Console rendering for the brain. These are TRUE so the interactive dev console
 # (`fast-body --console`) can show the brain's prompts, tool calls, and results.
 # In every other mode agent.py passes `quiet=True`, which overrides all three back

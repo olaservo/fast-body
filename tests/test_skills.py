@@ -303,7 +303,7 @@ async def test_servers_without_skills_say_so(dirs, relisted):
 
 async def test_relist_gives_the_agent_its_manifests_and_a_reader(dirs):
     """The real rebuild: manifests set, instruction rebuilt, read_skill available."""
-    from fast_agent.core.instruction_refresh import McpInstructionCapable
+    from fast_agent.core.instruction_refresh import SKILL_READER_FILE_READS, McpInstructionCapable
 
     _write_skill(dirs.installed / "guide-server" / "greet", "greet", "Say hello")
 
@@ -313,7 +313,8 @@ async def test_relist_gives_the_agent_its_manifests_and_a_reader(dirs):
         name = "body"
         aggregator = None
         skill_registry = None
-        skill_read_tool_name = "read_skill"
+        skill_read_access = SKILL_READER_FILE_READS
+        config = SimpleNamespace(tools=None)
         instruction_template = compose_instruction("Persona.")
         instruction_context: dict = {}
 

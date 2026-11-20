@@ -109,18 +109,20 @@ class WebChatServer:
         # None outside that window, when changes only persist to the file.
         self._brain: Any = None
         self._brain_loop: Any = None
+        # Called on the brain's loop after a route attaches a server.
+        self._after_attach: Any = None
 
         self.rpc = rpc.build(self)
         hub.bind_notifier(self.rpc.broadcast_threadsafe)
 
-    def bind_brain(self, brain: Any, loop: Any) -> None:
-        self._brain, self._brain_loop = brain, loop
+    def bind_brain(self, brain: Any, loop: Any, after_attach: Any = None) -> None:
+        self._brain, self._brain_loop, self._after_attach = brain, loop, after_attach
 
     def brain_bound(self) -> bool:
         return self._brain is not None
 
     def unbind_brain(self) -> None:
-        self._brain = self._brain_loop = None
+        self._brain = self._brain_loop = self._after_attach = None
 
     async def _on_brain(self, coro: Any, timeout: float) -> Any:
         """Run a coroutine on the brain's loop from a route on the server loop."""
