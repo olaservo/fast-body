@@ -127,6 +127,27 @@ def _enabled(entry: dict[str, Any]) -> bool:
     return entry.get("enabled", True) is not False
 
 
+# The servers the running personality card names. They attach for that card
+# even when switched off on the page: off means "not for every card".
+_card_servers: list[str] = []
+
+
+def set_card_servers(names: list[str]) -> None:
+    _card_servers[:] = names
+
+
+def card_problems() -> list[dict[str, str]]:
+    """The card's servers that are not there: never set up, or the last attach failed."""
+    stored = _load() if _card_servers else {}
+    out = []
+    for name in _card_servers:
+        if name not in stored:
+            out.append({"name": name, "reason": "not set up on the settings page"})
+        elif name in _errors:
+            out.append({"name": name, "reason": _errors[name]})
+    return out
+
+
 def list_servers() -> list[dict[str, Any]]:
     """The stored servers as the page shows them. Header values never leave."""
     out = []
@@ -136,6 +157,7 @@ def list_servers() -> list[dict[str, Any]]:
             {
                 "name": name,
                 "enabled": _enabled(entry),
+                "card": name in _card_servers,
                 "transport": entry.get("transport") or ("stdio" if entry.get("command") else "http"),
                 "url": entry.get("url") or "",
                 "command": entry.get("command") or "",
@@ -299,12 +321,12 @@ async def attached_names(brain: Any) -> list[str]:
 
 
 def _http_targets(names: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    """Enabled http servers (name -> entry), optionally only the named ones."""
+    """The enabled http servers (name -> entry), or the named ones whether enabled or not."""
     out = {}
     for name, entry in sorted(_load().items()):
         if names is not None and name not in names:
             continue
-        if not _enabled(entry):
+        if names is None and not _enabled(entry):
             continue
         url = entry.get("url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
@@ -351,7 +373,10 @@ async def warm_up(names: list[str] | None = None) -> str:
 async def attach_enabled(
     brain: Any, after: Any = None, needed: list[str] | None = None, ready: asyncio.Event | None = None
 ) -> str:
-    """Attach every enabled stored server at startup. One line for the log.
+    """Attach every enabled stored server at startup, and those in `needed`. One line for the log.
+
+    `needed` is what the personality card names. Those attach even when
+    switched off on the page, so a card brings its servers with it.
 
     Each server is warmed and attached on its own, so one that is asleep or
     unreachable holds up none of the others. The attaches themselves go one
@@ -363,7 +388,7 @@ async def attach_enabled(
     down should still talk. What failed is kept for retry_failed().
     """
     servers = _load()
-    wanted = [n for n, e in sorted(servers.items()) if _enabled(e)]
+    wanted = [n for n, e in sorted(servers.items()) if _enabled(e) or n in (needed or [])]
     _startup_failures.clear()
     if not wanted:
         if ready is not None:

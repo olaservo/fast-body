@@ -259,6 +259,21 @@
           setTimeout(checkSetup, 2000);
           return;
         }
+        var missing = (data && data.missing_servers) || [];
+        if (missing.length) {
+          var m = document.createElement("div");
+          m.textContent = "This personality's servers are not connected: " + missing.map(function (x) {
+            return x.name + " (" + x.reason + ")";
+          }).join(" · ");
+          var link = document.createElement("a");
+          link.href = settingsHref;
+          link.textContent = "Open settings →";
+          setup.appendChild(m);
+          setup.appendChild(link);
+          setup.hidden = false;
+          setTimeout(checkSetup, 15000);  // a retry in the background may still attach them
+          return;
+        }
         setup.hidden = true;
       })
       .catch(function () { /* the socket status already covers being offline */ });

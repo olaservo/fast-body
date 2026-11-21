@@ -612,7 +612,11 @@
       row.className = "field";
       var label = document.createElement("span");
       var target = s.transport === "stdio" ? (s.command + " " + s.args).trim() : s.url;
-      var state = !s.enabled ? "disabled"
+      // Off means "not for every personality": the one in use still attaches
+      // the servers it names.
+      var state = !s.enabled && s.card ? (s.attached === true ? "off, attached for this personality"
+                                          : "off, used by this personality, not attached")
+        : !s.enabled ? "disabled"
         : s.attached === true ? "attached"
         : s.attached === false ? "enabled, not attached"
         : "enabled";

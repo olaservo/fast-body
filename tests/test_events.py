@@ -176,7 +176,7 @@ def _core(voice, manager) -> FastBodyCore:
     core.stop_event = asyncio.Event()
     core._stopping = asyncio.Event()
     core._turn_speech = None
-    core.config = SimpleNamespace(voice_backend="realtime", brain_timeout_s=5)
+    core.config = SimpleNamespace(personality="default", voice_backend="realtime", brain_timeout_s=5)
     core._wakes = EventWakes(manager, [EventSpec("forge", "forge.your_move", wake=True)])
     return core
 
@@ -242,3 +242,15 @@ async def test_without_events_the_loop_listens_as_before():
     core._wakes = None
     voice.lines.put_nowait("hello")
     assert await core._listen_or_wake() == ("hello", False)
+
+
+async def test_the_cards_missing_servers_are_said_once_at_start():
+    voice = WakeVoice()
+    core = _core(voice, FakeManager())
+
+    await core._say_card_problems()  # nothing missing, nothing said
+    assert voice.spoken == []
+
+    core._card_problems = ({"name": "keeper", "reason": "503"}, {"name": "game-state", "reason": "not set up"})
+    await core._say_card_problems()
+    assert voice.spoken == ["I can't reach keeper and game-state right now, so some of what I do won't work."]

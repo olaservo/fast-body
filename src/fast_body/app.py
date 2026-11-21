@@ -31,7 +31,7 @@ from reachy_mini.apps.app import ReachyMiniApp
 from reachy_mini.utils import create_head_pose
 
 from fast_body import choices, events, mcp_servers, memory, skills
-from fast_body.config import ENV_FILE, Config, config_sources
+from fast_body.config import ENV_FILE, Config, config_sources, packaged_servers
 from fast_body.embodiment import cues
 from fast_body.embodiment.context import RobotContext
 from fast_body.embodiment.gaze import GazeController
@@ -166,6 +166,7 @@ class FastBodyCore:
 
     # MCP Events the card subscribes to; None when it lists none (events.py).
     _wakes: events.EventWakes | None = None
+    _card_problems: tuple[dict[str, str], ...] = ()
     _heard_speech = False  # the listen in flight has heard speech begin
 
     def __init__(
@@ -394,6 +395,7 @@ class FastBodyCore:
                     await warm_up
                 if resume.resumed:
                     await self._reopen(brain)
+                await self._say_card_problems()
                 if self.config.tui:
                     # fast-agent's own prompt loop, with our body tools attached.
                     self._speak_tui_replies(brain)
@@ -604,11 +606,18 @@ class FastBodyCore:
         # first turn back for as long as its warm-up takes. The servers the
         # card names are waited for, since the card's instruction counts on
         # their tools.
+        # They attach even when switched off on the settings page, so
+        # switching cards switches servers too.
+        card_servers = [s for s in persona.servers if s not in packaged_servers()]
+        mcp_servers.set_card_servers(card_servers)
         card_ready = asyncio.Event()
         self._mcp_startup = asyncio.create_task(
-            self._attach_servers(brain, list(persona.servers), card_ready), name="mcp-startup"
+            self._attach_servers(brain, card_servers, card_ready), name="mcp-startup"
         )
         await card_ready.wait()
+        self._card_problems = tuple(mcp_servers.card_problems())
+        for problem in self._card_problems:
+            logger.warning("mcp: the %s card needs %s: %s", self.config.personality, problem["name"], problem["reason"])
         if persona.events:
             manager = events.manager_for(brain.resolve_agent(None))
             if manager is not None:
@@ -630,6 +639,22 @@ class FastBodyCore:
         if self._turn_speech is not None:
             self._turn_speech.install(brain.resolve_agent(None))
         return resume
+
+    async def _say_card_problems(self) -> None:
+        """Say once which of the card's servers are missing. The pages show the reasons."""
+        if not self._card_problems or self.voice is None:
+            return
+        names = [p["name"] for p in self._card_problems]
+        listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        line = f"I can't reach {listed} right now, so some of what I do won't work."
+        logger.info("robot: %s", line)
+        if self.web_hub is not None:
+            self.web_hub.echo(line)
+        self._cue(cues.SPEAKING)
+        try:
+            await self._speak_or_stop(line)
+        except Exception as e:
+            logger.warning("could not say which servers are missing: %s", e)
 
     def _on_speech_start(self) -> None:
         self._heard_speech = True
@@ -769,6 +794,8 @@ class FastBodyCore:
                         continue
                 else:
                     wakes.turn_ok()
+            if not failed:
+                memory.tag_live(self.config.personality)
             if self._stopping.is_set():
                 break  # a stop came in while the turn finished; say nothing more
             if agent is not None and isinstance(reply, str):

@@ -96,7 +96,7 @@ async def test_the_turn_loop_leaves_when_stopped_mid_listen():
     )
     core.gaze = None
     core.web_hub = None
-    core.config = SimpleNamespace(voice_backend="realtime", brain_timeout_s=1.0)
+    core.config = SimpleNamespace(personality="default", voice_backend="realtime", brain_timeout_s=1.0)
     brain = SimpleNamespace(resolve_agent=lambda _n: None)
 
     converse = asyncio.ensure_future(core._converse(brain))
@@ -160,7 +160,7 @@ async def test_the_turn_loop_leaves_when_stopped_mid_reply():
     )
     core.gaze = None
     core.web_hub = None
-    core.config = SimpleNamespace(voice_backend="realtime", brain_timeout_s=1.0)
+    core.config = SimpleNamespace(personality="default", voice_backend="realtime", brain_timeout_s=1.0)
 
     async def send(_text):
         return "a long reply"

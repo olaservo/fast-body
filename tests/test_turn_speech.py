@@ -277,7 +277,7 @@ async def test_speaking_a_block_does_not_count_against_the_brain_timeout():
     voice = EventVoice(["hello"], events, takes=0.3)  # each block outlasts the timeout
     brain = ToolTurnBrain(["One.", "Two."], events, tool_takes=0.15)
     core = _speaking_core(voice)
-    core.config = SimpleNamespace(voice_backend="text", brain_timeout_s=0.2)
+    core.config = SimpleNamespace(personality="default", voice_backend="text", brain_timeout_s=0.2)
     core._turn_speech.install(brain.agent)
 
     await core._converse(brain)
@@ -293,7 +293,7 @@ async def test_a_brain_that_stalls_after_a_block_still_times_out(monkeypatch):
     voice = EventVoice(["hello"], events, takes=0.05)
     brain = ToolTurnBrain(["One.", "Two."], events, tool_takes=5)
     core = _speaking_core(voice)
-    core.config = SimpleNamespace(voice_backend="text", brain_timeout_s=0.1)
+    core.config = SimpleNamespace(personality="default", voice_backend="text", brain_timeout_s=0.1)
     core._turn_speech.install(brain.agent)
 
     await asyncio.wait_for(core._converse(brain), timeout=2)

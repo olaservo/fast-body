@@ -29,7 +29,7 @@ from fastapi import FastAPI
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route
 
-from fast_body import memory
+from fast_body import mcp_servers, memory
 from fast_body.config import (
     AVAILABLE_TTS_VOICES,
     MEMORY_DIR,
@@ -281,6 +281,7 @@ class WebChatServer:
                 "errors": cfg.validate(),
                 "ready": self.ready,
                 "locked": self.token is not None,
+                "missing_servers": mcp_servers.card_problems(),
                 # Not secret, unlike the keys — the page shows and sets these.
                 "personality": {"current": cfg.personality, "available": list_personalities()},
                 "voice": {

@@ -27,6 +27,7 @@ from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini.io.jsonrpc import INVALID_PARAMS, SERVER_ERROR, JsonRpcError
 from starlette.websockets import WebSocket
 
+from fast_body import mcp_servers
 from fast_body.config import Config
 from fast_body.web import app_routes, settings_routes
 from fast_body.web.access import MAX_MESSAGE_CHARS, RequestError, origin_ok, token_ok
@@ -157,6 +158,8 @@ def build(server: WebChatServer) -> JsonRpcServer:
             "personality": cfg.personality,
             "voice": cfg.resolve_tts_voice(),
             "listen_mode": listen["mode"] if listen else cfg.listen_mode,
+            # The card's servers that did not attach: [{name, reason}].
+            "missing_servers": mcp_servers.card_problems(),
         }
 
     def say(params: dict[str, Any]) -> dict[str, Any]:

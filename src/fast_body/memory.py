@@ -12,6 +12,7 @@ Everything degrades to "no memory" rather than failing a startup.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Sequence
@@ -61,6 +62,57 @@ def _age_hours(when: datetime) -> float:
     return (datetime.now() - when).total_seconds() / 3600.0
 
 
+# Which personality card each saved conversation belongs to: session name ->
+# card. Kept beside the sessions, since fast-agent has no public way to add to
+# a session's own metadata. A conversation from before this file existed has
+# no entry and belongs to whichever card resumes it first.
+def _cards_file() -> Path:
+    return MEMORY_DIR / "session_cards.json"
+
+
+def _cards() -> dict[str, str]:
+    try:
+        data = json.loads(_cards_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def tag_live(card: str) -> None:
+    """Record that the conversation being written belongs to `card`."""
+    name = live_session_name()
+    if not name or not card:
+        return
+    cards = _cards()
+    if cards.get(name) == card:
+        return
+    cards[name] = card
+    manager = session_manager()
+    try:
+        # Forgotten conversations leave the file here.
+        kept = {info.name for info in manager.list_sessions()} | {name} if manager is not None else set(cards)
+        path = _cards_file()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({k: v for k, v in cards.items() if k in kept}, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        logger.warning("could not record the conversation's personality: %s", e)
+
+
+def _latest_outside(manager: Any, others: set[str]) -> Any | None:
+    """The newest saved conversation with content whose name is not in `others`."""
+    for info in manager.list_sessions(include_empty=False):
+        if info.name in others:
+            continue
+        owned = getattr(manager, "owned_elsewhere", None)
+        if owned is not None and owned(info.name):
+            continue
+        session = manager.load_session(info.name)
+        if session is not None:
+            return session
+    return None
+
+
 @dataclass(frozen=True)
 class Resume:
     """What startup did about the last conversation."""
@@ -89,13 +141,20 @@ async def resume_recent(brain: Any, cfg: Config) -> Resume:
     if cfg.memory_resume_h <= 0:
         return Resume(f"saving to {MEMORY_DIR}, not resuming (FAST_BODY_MEMORY_RESUME_H=0)")
 
+    # A conversation is resumed by the card that had it, not by the next one.
+    others = {name for name, card in _cards().items() if card != cfg.personality}
     try:
-        latest = manager.load_latest_session(require_content=True)
+        if others:
+            latest = _latest_outside(manager, others)
+        else:
+            latest = manager.load_latest_session(require_content=True)
     except Exception as e:
         logger.warning("could not read the last session: %s", e)
         return Resume("unreadable, starting fresh")
 
     if latest is None:
+        if others:
+            return Resume(f"nothing saved as {cfg.personality}, starting fresh")
         return Resume(f"nothing to resume, saving to {MEMORY_DIR}")
 
     age = _age_hours(latest.info.last_activity)
@@ -118,6 +177,7 @@ async def resume_recent(brain: Any, cfg: Config) -> Resume:
         return Resume("nothing to resume, starting fresh")
 
     await _keep_brain_model(agent, wanted, wire_before)
+    tag_live(cfg.personality)
     turns = len(getattr(agent, "message_history", []) or [])
     return Resume(
         f"resumed {result.session.info.name} from {age:.1f}h ago, {turns} messages",
@@ -286,10 +346,12 @@ def list_sessions() -> list[dict[str, Any]]:
 
     from fast_agent.session import extract_session_title
 
+    cards = _cards()
     return [
         {
             "name": info.name,
             "title": extract_session_title(info.metadata) or "",
+            "personality": cards.get(info.name, ""),
             "started": info.created_at.isoformat(timespec="seconds"),
             "last_activity": info.last_activity.isoformat(timespec="seconds"),
             "age_hours": round(_age_hours(info.last_activity), 1),

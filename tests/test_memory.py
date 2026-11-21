@@ -460,3 +460,90 @@ def test_transcript_skips_empty_and_unknown_roles():
         FakeMessage("user", "kept"),
     ]
     assert memory.resumed_transcript(history) == [{"role": "user", "text": "kept"}]
+
+
+# ── a conversation belongs to the personality that had it ─────────────────
+class CardManager(FakeManager):
+    """Sessions newest first, loadable by name, with one being written."""
+
+    def __init__(self, sessions, live=None):
+        super().__init__(sessions=sessions)
+        self.current_session = live
+
+    def load_latest_session(self, *, require_content=False):
+        return self.sessions[0] if self.sessions else None
+
+    def load_session(self, name):
+        return next((s for s in self.sessions if s.info.name == name), None)
+
+    async def resume_session_agents_async(self, agents, name, fallback_agent_name=None):
+        self.resumed.append(name)
+        self.current_session = self.load_session(name)
+        return SimpleNamespace(session=self.current_session)
+
+
+@pytest.fixture
+def cards(tmp_path, monkeypatch):
+    """The file that says which personality each conversation belongs to."""
+    monkeypatch.setattr(memory, "MEMORY_DIR", tmp_path)
+    monkeypatch.setenv("FAST_BODY_MEMORY_RESUME_H", "6")
+    monkeypatch.setenv("FAST_BODY_PERSONALITY", "pirate")
+    path = tmp_path / "session_cards.json"
+
+    def write(mapping):
+        import json
+
+        path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    return SimpleNamespace(path=path, write=write, read=memory._cards)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_is_not_resumed_by_another_personality(bound, cards):
+    manager = bound(CardManager([_session("keeper-talk", hours_ago=0.5), _session("pirate-talk", hours_ago=2.0)]))
+    cards.write({"keeper-talk": "keeper", "pirate-talk": "pirate"})
+
+    outcome = await memory.resume_recent(FakeBrain(), Config())
+
+    assert manager.resumed == ["pirate-talk"]
+    assert outcome.resumed is True
+
+
+@pytest.mark.asyncio
+async def test_with_only_another_personalitys_conversations_it_starts_fresh(bound, cards):
+    manager = bound(CardManager([_session("keeper-talk", hours_ago=0.5)]))
+    cards.write({"keeper-talk": "keeper"})
+
+    outcome = await memory.resume_recent(FakeBrain(), Config())
+
+    assert manager.resumed == []
+    assert outcome.resumed is False
+    assert "nothing saved as pirate" in outcome.status
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_from_before_the_file_is_resumed_and_then_belongs(bound, cards):
+    manager = bound(CardManager([_session("old-talk", hours_ago=1.0)]))
+
+    outcome = await memory.resume_recent(FakeBrain(), Config())
+
+    assert manager.resumed == ["old-talk"]
+    assert outcome.resumed is True
+    assert cards.read() == {"old-talk": "pirate"}
+
+
+def test_tagging_records_the_live_conversation_and_drops_forgotten_ones(bound, cards):
+    live = _session("now")
+    bound(CardManager([live], live=live))
+    cards.write({"gone": "keeper"})
+
+    memory.tag_live("pirate")
+
+    assert cards.read() == {"now": "pirate"}
+    assert memory.list_sessions()[0]["personality"] == "pirate"
+
+
+def test_tagging_does_nothing_before_a_conversation_exists(bound, cards):
+    bound(CardManager([]))
+    memory.tag_live("pirate")
+    assert not cards.path.exists()

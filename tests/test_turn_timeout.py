@@ -67,7 +67,7 @@ def _core(voice) -> FastBodyCore:
     core.stop_event = asyncio.Event()
     core._stopping = asyncio.Event()
     core._turn_speech = None
-    core.config = SimpleNamespace(voice_backend="text", brain_timeout_s=0.05)
+    core.config = SimpleNamespace(personality="default", voice_backend="text", brain_timeout_s=0.05)
     return core
 
 

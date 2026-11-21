@@ -536,3 +536,49 @@ async def test_the_first_turn_waits_for_a_server_the_card_names(store, monkeypat
     other_up.set()
     await core._mcp_startup
     assert [c[1] for c in brain.attach_calls] == ["game", "other"]
+
+
+# ── the personality card's servers ────────────────────────────────────────
+@pytest.fixture
+def card(monkeypatch):
+    monkeypatch.setattr(mcp_servers, "_card_servers", [])
+    return mcp_servers.set_card_servers
+
+
+async def test_a_server_the_card_names_attaches_although_it_is_off(store, card):
+    mcp_servers.save_server("keeper", transport="http", url="https://k.test/mcp")
+    mcp_servers.save_server("other", transport="http", url="https://o.test/mcp")
+    mcp_servers.set_enabled("keeper", False)
+    mcp_servers.set_enabled("other", False)
+    card(["keeper"])
+    brain = FakeBrain()
+
+    status = await mcp_servers.attach_enabled(brain, needed=["keeper"])
+
+    assert [c[1] for c in brain.attach_calls] == ["keeper"]
+    assert status == "attached keeper"
+    listed = {s["name"]: s for s in mcp_servers.list_servers()}
+    assert listed["keeper"]["card"] is True and listed["keeper"]["enabled"] is False
+    assert listed["other"]["card"] is False
+
+
+async def test_the_cards_missing_servers_are_named_with_a_reason(store, card):
+    mcp_servers.save_server("bad", transport="http", url="https://b.test/mcp")
+    mcp_servers.save_server("good", transport="http", url="https://g.test/mcp")
+    card(["bad", "ghost", "good"])
+    brain = FakeBrain(fail="bad")
+
+    await mcp_servers.attach_enabled(brain, needed=["bad", "ghost", "good"])
+
+    assert mcp_servers.card_problems() == [
+        {"name": "bad", "reason": "connection refused"},
+        {"name": "ghost", "reason": "not set up on the settings page"},
+    ]
+    brain.fail = None
+    await mcp_servers.attach(brain, "bad")  # a retry got through
+    assert [p["name"] for p in mcp_servers.card_problems()] == ["ghost"]
+
+
+def test_no_card_servers_means_no_problems(store, card):
+    card([])
+    assert mcp_servers.card_problems() == []

@@ -101,11 +101,13 @@ default_model: hf.zai-org/GLM-5.3-Flash:baseten?reasoning=low   # any fast-agent
 
 Add servers from the settings page, which has a preset for Home Assistant's Model Context Protocol Server integration. Servers added there survive app updates.
 
+A server that is switched on attaches for every personality. One that is switched off still attaches for a personality whose card names it under `servers:`, so switching personality (and restarting) switches servers too. If a server the card names does not attach, the robot says so once at start, and the chat page and `conversation.status` give the reason.
+
 ### Memory
 
 Switch the robot on within `FAST_BODY_MEMORY_RESUME_H` hours (6 by default) of the last thing you said and it carries on the same conversation, repeating its last words to show where it left off. Leave it longer and it starts fresh.
 
-Conversations are kept in `~/.fast-body`, which survives app updates. The settings page lists them, with buttons to forget one or all. `ENABLE_MEMORY=false` stops saving and resuming.
+Conversations are kept in `~/.fast-body`, which survives app updates. The settings page lists them, with buttons to forget one or all. A conversation is picked back up only by the personality that had it. `ENABLE_MEMORY=false` stops saving and resuming.
 
 Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). The startup `context:` line says whether that is active.
 
@@ -124,7 +126,7 @@ variables:
 You are a robot of staggering intelligence and no enthusiasm whatsoever. …
 ```
 
-Under `variables:`, `voice` is which voice speaks and `delivery` is how it speaks: tone, pace, whether sentences lift or fall. A card can also set `model:` to use a different brain, `servers:` to attach extra MCP servers, and `variables.activity` to name tool calls on the chat page (`dance: striking up a tune`).
+Under `variables:`, `voice` is which voice speaks and `delivery` is how it speaks: tone, pace, whether sentences lift or fall. A card can also set `model:` to use a different brain, `servers:` to name the MCP servers it needs, and `variables.activity` to name tool calls on the chat page (`dance: striking up a tune`).
 
 A card can subscribe to MCP Events from its servers with `variables.events`, a list of `server`, `name`, optional `arguments` and optional `wake`. What arrives is handed to the brain at the start of its next turn, marked as untrusted data. With `wake: true` an event also starts a turn when nobody is speaking, and the robot says the reply aloud. The server has to offer the event by poll and be attached with `protocol_mode: modern`.
 
@@ -200,7 +202,7 @@ Methods:
 
 | Method | Params | Result |
 |---|---|---|
-| `conversation.status` | | `ready`, `backend_connected`, `backend_error`, `errors`, `locked`, `personality`, `voice`, `listen_mode` |
+| `conversation.status` | | `ready`, `backend_connected`, `backend_error`, `errors`, `locked`, `personality`, `voice`, `listen_mode`, `missing_servers` |
 | `conversation.say` | `text` | sent as your next turn, as if typed |
 | `conversation.interrupt` | | stops the reply in progress |
 | `conversation.history` | | `events`: the last 60 transcript entries, as the notifications that carried them |
