@@ -27,12 +27,12 @@ dependencies = [
   # Pinned exactly: the daemon installs apps with a plain `uv pip install`,
   # which takes the newest release a floor allows and never reads uv.lock.
   # Upgrading is: bump here, `uv lock`, tests, deploy.
-  # On the fork for MCP Events (poll delivery), which is not upstream yet. The
-  # branch is feat/mcp-events-poll-hub1: the events work on 0.10.54, plus one
+  # On the fork for MCP Events (poll and push delivery), which is not upstream yet. The
+  # branch is feat/mcp-events-push-hub1: the events work on 0.10.54, plus one
   # commit that lets huggingface_hub stay on 1.x. fast-agent pins 2.3.0 from
   # 0.10.47 on and reachy-mini requires <2.0.0, so upstream cannot install
   # beside it.
-  "fast-agent-mcp @ git+https://github.com/olaservo/fast-agent@15f429d059ce7eb1ef5559bd8a48bce0c86ca4dc",
+  "fast-agent-mcp @ git+https://github.com/olaservo/fast-agent@ebb29e34e8cf838541fb8a47d2b1ccb84170559a",
   # fast-agent 0.10.x needs a fastmcp-slim 4.0 pre-release. uv only allows a
   # pre-release when a *direct* dependency asks for one, and the daemon installs
   # apps with a plain `uv pip install`, which ignores [tool.uv]. Declaring it here

@@ -10,7 +10,8 @@ A card lists the events it wants under `variables.events`:
         - server: forge
           name: forge.chat
 
-fast-agent polls each subscription and hands what arrived to the model at the
+fast-agent keeps each subscription, by push when the server offers it and by
+poll otherwise, and hands what arrived to the model at the
 start of the next turn, as a user message marked untrusted. An event from a
 subscription with `wake: true` also starts a turn when nobody is speaking;
 without it the event waits for the next turn the user starts. Wake is off by
