@@ -32,7 +32,7 @@ dependencies = [
   # commit that lets huggingface_hub stay on 1.x. fast-agent pins 2.3.0 from
   # 0.10.47 on and reachy-mini requires <2.0.0, so upstream cannot install
   # beside it.
-  "fast-agent-mcp @ git+https://github.com/olaservo/fast-agent@ebb29e34e8cf838541fb8a47d2b1ccb84170559a",
+  "fast-agent-mcp @ git+https://github.com/olaservo/fast-agent@9affc556dd6c402b718a2b17ee62bd7a0aa35948",
   # fast-agent 0.10.x needs a fastmcp-slim 4.0 pre-release. uv only allows a
   # pre-release when a *direct* dependency asks for one, and the daemon installs
   # apps with a plain `uv pip install`, which ignores [tool.uv]. Declaring it here
