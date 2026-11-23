@@ -55,10 +55,16 @@
     color: var(--muted);
   }
   header a {
-    margin-left: auto;
     font-size: 13px;
     color: var(--user);
   }
+  #wide {
+    margin-left: auto;
+    font-size: 13px;
+    padding: 2px 8px;
+  }
+  /* Full width: the conversation and its widgets fill the window. */
+  body.wide .line, body.wide .line.app { max-width: 100%; }
   #setup {
     margin: 0 18px;
     padding: 12px 14px;
@@ -170,6 +176,8 @@
   <header>
     <h1>fast-body</h1>
     <span id="status">connecting…</span>
+    <button id="wide" title="Let the conversation and its widgets fill the window" aria-pressed="false">full width</button>
+    <a id="own-window" href="#" target="_blank" rel="noopener" hidden>own window</a>
     <a id="settings-link" href="#">settings</a>
   </header>
 
@@ -230,6 +238,26 @@
   var setup = document.getElementById("setup");
   var settingsHref = "/settings" + q;
   document.getElementById("settings-link").href = settingsHref;
+
+  // Full width is remembered per browser. Storage can be blocked, so it is a nicety.
+  var wide = document.getElementById("wide");
+  function setWide(on) {
+    document.body.classList.toggle("wide", on);
+    wide.setAttribute("aria-pressed", on ? "true" : "false");
+    wide.textContent = on ? "normal width" : "full width";
+  }
+  try { setWide(localStorage.getItem("wide") === "1"); } catch (e) { setWide(false); }
+  wide.addEventListener("click", function () {
+    var on = !document.body.classList.contains("wide");
+    setWide(on);
+    try { localStorage.setItem("wide", on ? "1" : "0"); } catch (e) {}
+  });
+  // Inside another page's frame the window is whatever that page gives it.
+  if (window.self !== window.top) {
+    var own = document.getElementById("own-window");
+    own.href = location.href;
+    own.hidden = false;
+  }
 
   // The app serves this page before it can talk, so say which it is rather than
   // leaving a chat window that silently never answers. While it is still

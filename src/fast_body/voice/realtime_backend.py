@@ -34,6 +34,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -59,6 +60,10 @@ _FAILURES_BEFORE_ALARM = 3
 # A push-to-talk hold shorter than this is a brush of the antenna, not a word;
 # it is also the server's own minimum for a commit.
 _PTT_MIN_HOLD_MS = 100.0
+# How long listen() waits for a hold to be released, and for a committed hold's
+# transcript, before it answers what it already has.
+_PTT_HOLD_MAX_S = 60.0
+_PTT_TRANSCRIPT_MAX_S = 10.0
 
 
 class RealtimeVoiceBackend(OpenAIVoiceBackend):
@@ -86,6 +91,9 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
         self._ptt_ms_since_open = 0.0  # mic audio pumped during the current hold
         self._ptt_speech_since_open = False  # the local VAD heard speech during it
         self._ptt_server_turn_since_open = False  # the server ended the turn itself during it
+        self._ptt_awaited = 0  # holds committed whose transcript has not arrived
+        self._ptt_committed_at = 0.0
+        self._ptt_opened = asyncio.Event()  # pulsed when a hold opens, to cut a reply being synthesized
 
     def supports_push_to_talk(self) -> bool:
         return True
@@ -101,6 +109,7 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
             return None  # nobody's talking; let the caller loop
         finally:
             self._listening = False
+        await self._wait_out_hold()
         # With barge-in on, anything said while the brain was thinking or the
         # robot was talking is still queued. Hand it over with this transcript
         # as one turn; taking only the oldest would answer each utterance one
@@ -110,6 +119,32 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
             logger.info("heard %d more utterance(s) since the last turn; answering them together", len(later))
             text = " ".join([text, *later])
         return text
+
+    def _hold_open(self) -> bool:
+        return self._push_to_talk and not self._gated.is_set()
+
+    async def _wait_out_hold(self) -> None:
+        """Wait while the person is still holding to talk, or their words are being transcribed.
+
+        A transcript queued from an earlier hold would otherwise start a turn
+        while they speak, and the reply to it would land on top of the newer
+        words (seen on the robot 2026-11-23: every answer one message late).
+        """
+        if not self._push_to_talk:
+            return
+        started = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if self._hold_open():
+                if now - started > _PTT_HOLD_MAX_S:
+                    return
+            elif self._ptt_awaited > 0:
+                if now - self._ptt_committed_at > _PTT_TRANSCRIPT_MAX_S:
+                    self._ptt_awaited = 0
+                    return
+            else:
+                return
+            await asyncio.sleep(0.05)
 
     def _ensure_session(self) -> None:
         if self._session_task is None or self._session_task.done():
@@ -264,6 +299,7 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
                 logger.debug("partial: %s", event.delta)
             elif event.type == "conversation.item.input_audio_transcription.completed":
                 text = (event.transcript or "").strip()
+                self._ptt_awaited = max(0, self._ptt_awaited - 1)
                 # Endpointing should make stock filler rare, but the phrase list
                 # costs nothing and the failure it catches is loud.
                 if not text or _is_hallucination(text):
@@ -271,6 +307,7 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
                     continue
                 self._heard.put_nowait(text)
             elif event.type == "conversation.item.input_audio_transcription.failed":
+                self._ptt_awaited = max(0, self._ptt_awaited - 1)
                 logger.warning("transcription failed: %s", getattr(event, "error", None))
             elif event.type == "error":
                 error = getattr(event, "error", None)
@@ -296,6 +333,7 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
         # Releases `_play_with_barge_in`, which flushes the player itself; when
         # nothing is playing the flush below is a no-op.
         self._speech_started.set()
+        self._ptt_opened.set()
         self._flush_playback()
         if self._listening:
             self._notify_speech_start()
@@ -335,6 +373,9 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
             await conn.input_audio_buffer.commit()
         except Exception as e:
             logger.warning("push-to-talk commit failed: %s", e)
+            return
+        self._ptt_awaited += 1
+        self._ptt_committed_at = time.monotonic()
 
     async def on_listen_mode_changed(self, mode: str) -> None:
         """Rebuild the session: turn detection is fixed when it connects."""
@@ -354,10 +395,17 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
         # The mic hears the robot, so stop feeding the recognizer while it talks
         # — unless barge-in wants those frames.
         mute = not self._barge_in
+        if self._barge_in and self._hold_open():
+            # The person is holding to talk: a reply to what came before would talk over them.
+            logger.info("barge-in: not speaking over a hold")
+            return
         if mute:
             self._muted.set()
         try:
-            await super().speak(text, voice=voice, delivery=delivery)
+            if self._barge_in and self._push_to_talk:
+                await self._speak_until_hold(super().speak(text, voice=voice, delivery=delivery))
+            else:
+                await super().speak(text, voice=voice, delivery=delivery)
         finally:
             if mute:
                 self._flush_mic()
@@ -365,6 +413,31 @@ class RealtimeVoiceBackend(OpenAIVoiceBackend):
                 if dropped:
                     logger.debug("dropped %d transcript(s) heard during playback", len(dropped))
                 self._muted.clear()
+
+    async def _speak_until_hold(self, speaking: Any) -> None:
+        """Speak, but stop when a hold opens while the reply is still being synthesized.
+
+        Once synthesis is done `_play_with_barge_in` watches for the hold; before
+        that, chunks keep arriving and would play on after the gate's flush.
+        """
+        self._ptt_opened.clear()
+        task = asyncio.ensure_future(speaking)
+        opened = asyncio.ensure_future(self._ptt_opened.wait())
+        try:
+            await asyncio.wait({task, opened}, return_when=asyncio.FIRST_COMPLETED)
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                self._flush_playback()
+                logger.info("barge-in: user interrupted, stopping playback")
+            else:
+                task.result()
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        finally:
+            opened.cancel()
 
     async def _play_with_barge_in(self, duration: float) -> None:
         """Wait out playback, but cut it off when the server hears speech, or the gate opens."""

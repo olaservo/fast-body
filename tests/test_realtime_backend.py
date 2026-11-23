@@ -592,3 +592,103 @@ async def test_a_mode_change_with_no_session_waits_for_the_next_listen(ptt: Real
     await ptt.on_listen_mode_changed("always_on")
     assert ptt._session_task is None
     assert ptt._session_config()["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+
+
+# ── a hold in progress ───────────────────────────────────────────────────
+async def _commit_a_hold(ptt: RealtimeVoiceBackend) -> None:
+    ptt._ptt_ms_since_open = 1200.0
+    ptt._ptt_speech_since_open = True
+    await ptt.on_listen_close(commit=True)
+
+
+async def test_listen_waits_for_a_hold_in_progress(ptt: RealtimeVoiceBackend) -> None:
+    """Seen on the robot: an earlier transcript started a turn while the person was still speaking."""
+    ptt._heard.put_nowait("the earlier question")
+    await ptt.on_listen_open(continuous=True)
+    listening = asyncio.ensure_future(ptt.listen())
+    await asyncio.sleep(0.15)
+    assert not listening.done()
+
+    await _commit_a_hold(ptt)
+    await asyncio.sleep(0.15)
+    assert not listening.done()  # released, the words are still being transcribed
+
+    await ptt._consume(
+        FakeConn([FakeEvent("conversation.item.input_audio_transcription.completed", transcript="the newer one")])
+    )
+    assert await asyncio.wait_for(listening, timeout=1.0) == "the earlier question the newer one"
+
+
+async def test_listen_does_not_wait_for_a_hold_that_committed_nothing(ptt: RealtimeVoiceBackend) -> None:
+    ptt._heard.put_nowait("a question")
+    await ptt.on_listen_open(continuous=True)
+    await ptt.on_listen_close(commit=True)  # a brush of the antenna
+    assert await asyncio.wait_for(ptt.listen(), timeout=1.0) == "a question"
+
+
+async def test_listen_gives_up_on_a_transcript_that_never_arrives(ptt: RealtimeVoiceBackend, monkeypatch) -> None:
+    import fast_body.voice.realtime_backend as realtime_backend
+
+    monkeypatch.setattr(realtime_backend, "_PTT_TRANSCRIPT_MAX_S", 0.1)
+    ptt._heard.put_nowait("a question")
+    await ptt.on_listen_open(continuous=True)
+    await _commit_a_hold(ptt)
+    assert await asyncio.wait_for(ptt.listen(), timeout=1.0) == "a question"
+    assert ptt._ptt_awaited == 0
+
+
+async def test_a_failed_or_discarded_transcript_is_no_longer_awaited(ptt: RealtimeVoiceBackend) -> None:
+    await ptt.on_listen_open(continuous=True)
+    await _commit_a_hold(ptt)
+    await ptt.on_listen_open(continuous=True)
+    await _commit_a_hold(ptt)
+    assert ptt._ptt_awaited == 2
+    await ptt._consume(
+        FakeConn(
+            [
+                FakeEvent("conversation.item.input_audio_transcription.failed"),
+                FakeEvent("conversation.item.input_audio_transcription.completed", transcript=""),
+            ]
+        )
+    )
+    assert ptt._ptt_awaited == 0
+
+
+async def test_a_reply_is_not_spoken_over_a_hold(ptt: RealtimeVoiceBackend) -> None:
+    spoke = False
+
+    async def fake_speak(self, text: str, **_: object) -> None:
+        nonlocal spoke
+        spoke = True
+
+    import fast_body.voice.openai_backend as openai_backend
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(openai_backend.OpenAIVoiceBackend, "speak", fake_speak)
+        await ptt.on_listen_open(continuous=True)
+        await ptt.speak("an answer to the earlier question")
+        assert not spoke
+        await ptt.on_listen_close(commit=False)
+        await ptt.speak("an answer")
+        assert spoke
+
+
+async def test_a_hold_cuts_a_reply_that_is_still_being_synthesized(ptt: RealtimeVoiceBackend) -> None:
+    finished = False
+
+    async def slow_speak(self, text: str, **_: object) -> None:
+        nonlocal finished
+        await asyncio.sleep(5)
+        finished = True
+
+    import fast_body.voice.openai_backend as openai_backend
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(openai_backend.OpenAIVoiceBackend, "speak", slow_speak)
+        speaking = asyncio.ensure_future(ptt.speak("a long answer"))
+        await asyncio.sleep(0.05)
+        await ptt.on_listen_open(continuous=True)
+        await asyncio.wait_for(speaking, timeout=1.0)
+
+    assert not finished
+    assert ptt._robot.media.cleared >= 1
