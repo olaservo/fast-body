@@ -30,7 +30,7 @@ from typing import Any
 from reachy_mini.apps.app import ReachyMiniApp
 from reachy_mini.utils import create_head_pose
 
-from fast_body import choices, events, mcp_servers, memory, skills
+from fast_body import choices, events, mcp_servers, memory, skills, traces
 from fast_body.config import ENV_FILE, Config, config_sources, packaged_servers
 from fast_body.embodiment import cues
 from fast_body.embodiment.context import RobotContext
@@ -190,6 +190,7 @@ class FastBodyCore:
         self.web_hub: Any = None
         self._turn_speech: TurnSpeech | None = None
         self._mcp_startup: asyncio.Task | None = None
+        self._trace_upload: asyncio.Task | None = None
         self._wobbling = False
         # Push-to-talk: built in _start_body from the config as finally loaded.
         self.listen_gate: ListenGate | None = None
@@ -407,6 +408,9 @@ class FastBodyCore:
             retry = self._mcp_startup
             if retry is not None and not retry.done():
                 retry.cancel()
+            upload = self._trace_upload
+            if upload is not None and not upload.done():
+                upload.cancel()
             if self.web is not None:
                 self.web.unbind_brain()
             await self._shutdown()
@@ -597,6 +601,9 @@ class FastBodyCore:
         resume = await memory.resume_recent(brain, self.config)
         logger.info("memory: %s", resume.status)
         logger.info("context: %s", memory.apply_context_budget(brain, self.config))
+        if self.config.trace_url:
+            # In the background: an upload must not hold the first turn back.
+            self._trace_upload = asyncio.create_task(traces.upload_and_log(self.config), name="trace-upload")
         logger.info("skills: %s", await skills.sync_from_servers(brain))
         from fast_body.personality import load_personality
 

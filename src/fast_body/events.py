@@ -154,7 +154,10 @@ class EventWakes:
                     self._manager.poll_now(key)
                     continue
                 self._held[index] = subscription
-                done.append(label + (" (wake)" if spec.wake else ""))
+                # "push" or "poll", fixed for the run. Absent on an older fast-agent.
+                delivery = getattr(subscription, "delivery", None)
+                notes = [note for note in (delivery, "wake" if spec.wake else None) if note]
+                done.append(label + (f" ({', '.join(notes)})" if notes else ""))
         parts = []
         if done:
             parts.append("subscribed " + ", ".join(done))

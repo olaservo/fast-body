@@ -97,6 +97,20 @@ async def test_subscribing_waits_for_the_server_and_drops_what_it_does_not_offer
     assert manager.polled == ["forge/forge.your_move"]
 
 
+async def test_the_subscribe_line_names_the_delivery_mode():
+    manager = FakeManager()
+    wakes = EventWakes(manager, [EventSpec("forge", "forge.your_move", wake=True), EventSpec("forge", "forge.chat")])
+    subscribe = manager.subscribe
+
+    async def with_delivery(server, name, arguments=None, *, wake=False):
+        subscription = await subscribe(server, name, arguments, wake=wake)
+        subscription.delivery = "push" if wake else "poll"
+        return subscription
+
+    manager.subscribe = with_delivery
+    assert await wakes.subscribe(["forge"]) == "subscribed forge/forge.your_move (push, wake), forge/forge.chat (poll)"
+
+
 async def test_a_server_attached_again_gets_its_subscriptions_back():
     manager = FakeManager()
     wakes = EventWakes(manager, [EventSpec("forge", "forge.your_move", wake=True)])

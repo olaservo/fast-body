@@ -78,6 +78,11 @@ def _cards() -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
+def session_cards() -> dict[str, str]:
+    """Which personality card each saved conversation belongs to."""
+    return _cards()
+
+
 def tag_live(card: str) -> None:
     """Record that the conversation being written belongs to `card`."""
     name = live_session_name()

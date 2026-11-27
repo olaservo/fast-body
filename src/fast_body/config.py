@@ -384,6 +384,12 @@ class Config:
     # memory.apply_context_budget converts this budget into that fraction once
     # it knows the window. 0 leaves fast-agent's own threshold alone.
     context_budget_tokens: int = field(default_factory=lambda: int(_number("FAST_BODY_CONTEXT_BUDGET", 60000)))
+    # Copy saved conversations to Hugging Face storage as traces, at each start.
+    # `hf://buckets/<owner>/<name>` or `hf://datasets/<owner>/<name>`, with an
+    # optional folder. Blank = off. See traces.py.
+    trace_url: str = field(default_factory=lambda: os.getenv("FAST_BODY_TRACE_URL", "").strip())
+    # A Hugging Face token that can write there. Blank = the app's HF_TOKEN.
+    trace_token: str = field(default_factory=lambda: os.getenv("FAST_BODY_TRACE_TOKEN", "").strip(), repr=False)
 
     # Robot
     robot_name: str | None = field(default_factory=lambda: os.getenv("ROBOT_NAME") or None)

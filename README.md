@@ -111,6 +111,8 @@ Conversations are kept in `~/.fast-body`, which survives app updates. The settin
 
 Long conversations are compacted at `FAST_BODY_CONTEXT_BUDGET` tokens (60000). The startup `context:` line says whether that is active.
 
+fast-agent keeps the 30 most recent conversations and deletes older ones. To keep a copy, set `FAST_BODY_TRACE_URL` to a Hugging Face bucket or dataset (`hf://buckets/<owner>/<name>` or `hf://datasets/<owner>/<name>`). At each start the app uploads every saved conversation that changed since its last upload, as an ATIF trace under `<url>/<personality>/<session>.json`. The conversation in progress goes up on a later start. A trace holds everything said to the robot and every tool result; the bucket or dataset is created private if it does not exist. The upload needs a Hugging Face token with write access to it: set `FAST_BODY_TRACE_TOKEN`, or leave it blank to use the token the app already runs with. A token limited to inference cannot upload. The startup `traces:` line says what was uploaded.
+
 ### Personalities
 
 Who the robot *is* comes from a personality card. A card is a fast-agent [AgentCard](https://fast-agent.ai): a markdown file whose YAML frontmatter describes the agent and whose body is the persona instruction. fast-body ships `default`, `marvin` and `tavern`. Pick one with `FAST_BODY_PERSONALITY`, the `--personality` flag, or the settings page, which applies it on the next start.
