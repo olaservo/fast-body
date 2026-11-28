@@ -664,7 +664,7 @@ wheels = [
 [[package]]
 name = "fast-agent-mcp"
 version = "0.10.69"
-source = { git = "https://github.com/olaservo/fast-agent?rev=ba8e2f5ceabf10d6c3ef9325215fdc996ac6e2c4#ba8e2f5ceabf10d6c3ef9325215fdc996ac6e2c4" }
+source = { git = "https://github.com/olaservo/fast-agent?rev=a434e0ccb2ba89a16ddcbfb07b384cc77eb2fe42#a434e0ccb2ba89a16ddcbfb07b384cc77eb2fe42" }
 dependencies = [
     { name = "a2a-sdk" },
     { name = "agent-client-protocol" },
@@ -731,7 +731,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fast-agent-mcp", git = "https://github.com/olaservo/fast-agent?rev=ba8e2f5ceabf10d6c3ef9325215fdc996ac6e2c4" },
+    { name = "fast-agent-mcp", git = "https://github.com/olaservo/fast-agent?rev=a434e0ccb2ba89a16ddcbfb07b384cc77eb2fe42" },
     { name = "fastmcp-slim", specifier = ">=4.0.0b2" },
     { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'" },
